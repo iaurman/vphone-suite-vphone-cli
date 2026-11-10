@@ -8,8 +8,8 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
     private var vm: VPhoneVirtualMachine?
     private var control: VPhoneGuestControl?
     private var windowController: VPhoneVirtualMachineWindowController?
-    /// The VM's WebRTC side (PLAN.md §3). Nil for headless, DFU and template
-    /// launches, and while the windowed VM has not started yet.
+    /// The VM's WebRTC side (PLAN.md §3). Nil for DFU and template launches,
+    /// and while the VM has not started yet.
     private var vpdc: VPhoneVirtualMachineVPDC?
     /// The display vpdc captures, held weakly for its capture queue.
     private var vpdcDisplay: VPhoneVPDCDisplayBox?
@@ -163,6 +163,12 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // WebRTC runs for every launch, headless included: the graphics device
+        // and its display are configured regardless of the window, and capture
+        // is a request to the VM service rather than a read of a view. A VM that
+        // exists only to be watched costs the most when it *has* a window.
+        startVPDC(vm: vm, options: options)
+
         let screenRecorder = VPhoneScreenRecorder()
         if !command.noGraphics {
             let keySender = VPhoneVirtualMachineKeySender(vm: vm, control: control)
@@ -189,7 +195,6 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
             wc.captureView?.isTVGuest = options.isTVGuest
             wc.homeButtonHoldsInGuest = options.isTVGuest
             windowController = wc
-            startVPDC(vm: vm, options: options)
             if options.isHomePodGuest {
                 homePodDisplayTask = Task { [weak wc, weak control] in
                     // One snapshot in flight, with no queue of stale animation
@@ -427,8 +432,9 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The VM's WebRTC side: the port block vpd allocated, the three relays,
-    /// the H.264 stream from the windowed display, the audio tap and the
-    /// `vpweb` gateway this process spawns. Only a windowed launch has it.
+    /// the H.264 stream from the display, the audio tap and the `vpweb` gateway
+    /// this process spawns. Every launch that may stream has it, windowed or
+    /// headless; the display exists either way.
     @MainActor
     private func startVPDC(vm: VPhoneVirtualMachine, options: VPhoneVirtualMachine.Options) {
         let box = VPhoneVPDCDisplayBox()

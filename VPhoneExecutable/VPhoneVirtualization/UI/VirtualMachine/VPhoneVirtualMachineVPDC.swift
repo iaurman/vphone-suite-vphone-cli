@@ -16,21 +16,23 @@ final class VPhoneVPDCDisplayBox: @unchecked Sendable {
 /// vpdc, running inside this `vphone-vm` process: the per-VM WebRTC side of
 /// `PLAN.md` §3.
 ///
-/// It is created for a normal windowed launch only. `--headless`, DFU, a
-/// template build and a template-setup boot have no `VZGraphicsDisplay` worth
-/// capturing, and must not open LAN ports for an image that is being prepared
+/// It is created for every launch that may stream, `--headless` included: the
+/// graphics device and its `VZGraphicsDisplay` are configured for every boot,
+/// and capture is an XPC request to the VM service, not a read of a window. DFU
+/// (no guest at all), a template build and a template-setup boot are still
+/// refused, and must not open LAN ports for an image that is being prepared
 /// rather than run.
 ///
 /// The vpd connection, the port block, the relays, the gateway and the audio
 /// tap all live in `VPDCController`; this type only supplies the two pieces
-/// that need `vphone-vm` itself: the windowed display, and the guest's
-/// rotation as the window controller already polls it. It is deliberately not
-/// actor-isolated: the VM's stop notification arrives off the main thread and
-/// must still be able to release the audio tap and the ports.
+/// that need `vphone-vm` itself: the display, and the guest's rotation as the
+/// window controller already polls it. It is deliberately not actor-isolated:
+/// the VM's stop notification arrives off the main thread and must still be
+/// able to release the audio tap and the ports.
 final class VPhoneVirtualMachineVPDC: @unchecked Sendable {
     let controller: VPDCController
     private let log: VPDCLog
-    /// The windowed display, read on the main thread for its frame size.
+    /// The VM's display, read on the main thread for its frame size.
     private let display: @Sendable () -> VZGraphicsDisplay?
     /// The size the controller starts with. The observer only forwards a real
     /// change, so the first read costs nothing when the display matches the
