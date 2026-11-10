@@ -4,7 +4,7 @@ import SwiftUI
 struct VPhoneLaunchpadHostSetupView: View {
     @Environment(VPhoneLaunchpadModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(VPhoneLaunchpadMenuBar.key) private var showsInMenuBar = false
+    @AppStorage(VPhoneLaunchpadMenuBar.key) private var showsInMenuBar = true
     @State private var showsSkillInstall = false
 
     private var host: VPhoneLaunchpadHostSetup {

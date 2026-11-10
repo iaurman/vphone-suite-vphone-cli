@@ -49,10 +49,22 @@
 	     guest records. Same arrangement as the location descriptions above. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Shares this Mac's microphone with the virtual iPhone so apps running inside it can record.</string>
+	<!-- vpdc taps the process that renders the guest's audio and forwards it to
+	     the browser client. The tap is created by vphone-vm, a tool this app
+	     launched, so TCC asks for this app. macOS refuses the tap outright
+	     without this key ("kTCCServiceAudioCapture"). -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>与虚拟机共享这台 Mac 的音频，以便远程客户端听到声音。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Shares this Mac's camera with the virtual iPhone while System Camera streaming is enabled.</string>
 	<key>NSCameraUseContinuityCameraDeviceType</key>
 	<true/>
+	<!-- vpd listens on every interface: its REST API and web UI are on
+	     0.0.0.0:6780, and each running VM publishes its WebRTC gateway, its
+	     control socket relay, SSH and Frida on that VM's four-port block.
+	     macOS 15 asks once, with this text, before the first LAN connection. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Shares this Mac's virtual iPhones with other devices on your local network, so you can watch and control them from another computer.</string>
 	<!-- A machine exported by Launchpad: a gnutar of the machine folder,
 	     zstd compressed, the same archive `vphone-cli vm export` writes.
 	     Launchpad owns the type, so opening one in Finder imports it. -->

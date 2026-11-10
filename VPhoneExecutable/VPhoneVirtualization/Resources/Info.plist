@@ -14,6 +14,17 @@
 	<string>2.15.2</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Shares this Mac's microphone with the virtual iPhone so apps running inside it can record.</string>
+	<!-- vpdc (linked into vphone-vm) taps the process that renders the guest's
+	     audio so the browser client can hear it. Without this key macOS
+	     refuses the tap with "kTCCServiceAudioCapture … without
+	     NSAudioCaptureUsageDescription" and the tap silently delivers zeros. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>与虚拟机共享这台 Mac 的音频，以便远程客户端听到声音。</string>
+	<!-- The per-VM WebRTC gateway (vpweb) listens on 0.0.0.0:<base> TCP and UDP,
+	     vpdc on the three relay ports beside it. macOS 15 asks once, with this
+	     text, before the first LAN connection. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Shares this virtual iPhone with other devices on your local network, so you can watch and control it from another computer.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Shares this Mac's camera with the virtual iPhone while System Camera streaming is enabled.</string>
 	<key>NSCameraUseContinuityCameraDeviceType</key>

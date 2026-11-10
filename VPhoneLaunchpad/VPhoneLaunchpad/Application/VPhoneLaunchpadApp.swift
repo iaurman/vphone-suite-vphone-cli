@@ -5,14 +5,20 @@ import SwiftUI
 struct VPhoneLaunchpadApp: App {
     @NSApplicationDelegateAdaptor(VPhoneLaunchpadAppDelegate.self) private var delegate
     @State private var model = VPhoneLaunchpadModel()
-    @AppStorage(VPhoneLaunchpadMenuBar.key) private var showsInMenuBar = false
+    /// Menu bar mode is on by default: closing the window keeps Launchpad, and
+    /// with it vpd and every VM's port mapping, running.
+    @AppStorage(VPhoneLaunchpadMenuBar.key) private var showsInMenuBar = true
 
     init() {
         // AppKit must not restore saved window state. Everything starts from
         // the window's task, so a launch that restores a state with no window
         // in it never opens the control socket, and after a crash AppKit
         // holds the launch at an alert about reopening windows.
-        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
+        UserDefaults.standard.register(defaults: [
+            "ApplePersistenceIgnoreState": true,
+            // The default for a user who has never touched the setting.
+            VPhoneLaunchpadMenuBar.key: true,
+        ])
     }
 
     var body: some Scene {
@@ -102,6 +108,12 @@ final class VPhoneLaunchpadAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_: Notification) {
         dockPolicy.start()
+    }
+
+    /// vpd's sockets go with the process; the port reservations stay on disk,
+    /// so every machine keeps its block when Launchpad comes back.
+    func applicationWillTerminate(_: Notification) {
+        model?.stopVPD()
     }
 
     /// A `.vpea` opened in Finder, or dropped on the Dock icon, is imported

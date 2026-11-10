@@ -15,6 +15,8 @@
 		DD0000000000000000000106 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = DD0000000000000000000201 /* ArgumentParser */; };
 		DD0000000000000000000107 /* NIOHTTP1 in Frameworks */ = {isa = PBXBuildFile; productRef = DD0000000000000000000205 /* NIOHTTP1 */; };
 		DD0000000000000000000108 /* NIOWebSocket in Frameworks */ = {isa = PBXBuildFile; productRef = DD0000000000000000000206 /* NIOWebSocket */; };
+		DD0000000000000000000109 /* VPDC in Frameworks */ = {isa = PBXBuildFile; productRef = DD0000000000000000000208 /* VPDC */; };
+		DD000000000000000000010A /* VPDC in Frameworks */ = {isa = PBXBuildFile; productRef = DD0000000000000000000208 /* VPDC */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +65,7 @@
 			files = (
 				DD0000000000000000000101 /* ArgumentParser in Frameworks */,
 				DD0000000000000000000105 /* libVPhoneVirtualMachineKit.a in Frameworks */,
+				DD0000000000000000000109 /* VPDC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,6 +79,7 @@
 				DD0000000000000000000104 /* NIOPosix in Frameworks */,
 				DD0000000000000000000107 /* NIOHTTP1 in Frameworks */,
 				DD0000000000000000000108 /* NIOWebSocket in Frameworks */,
+				DD000000000000000000010A /* VPDC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -151,6 +155,7 @@
 				DD0000000000000000000205 /* NIOHTTP1 */,
 				DD0000000000000000000206 /* NIOWebSocket */,
 				DD0000000000000000000207 /* GhosttyTerminal */,
+				DD0000000000000000000208 /* VPDC */,
 			);
 			productName = VPhoneVirtualMachineKit;
 			productReference = DD0000000000000000000032 /* libVPhoneVirtualMachineKit.a */;
@@ -174,6 +179,7 @@
 			name = "vphone-vm";
 			packageProductDependencies = (
 				DD0000000000000000000201 /* ArgumentParser */,
+				DD0000000000000000000208 /* VPDC */,
 			);
 			productName = "vphone-vm";
 			productReference = DD0000000000000000000033 /* vphone-vm */;
@@ -221,6 +227,7 @@
 				DD0000000000000000000172 /* XCRemoteSwiftPackageReference "Dynamic" */,
 				DD0000000000000000000173 /* XCRemoteSwiftPackageReference "swift-nio" */,
 				DD0000000000000000000174 /* XCRemoteSwiftPackageReference "libghostty-spm" */,
+				DD0000000000000000000175 /* XCLocalSwiftPackageReference "vpdc" */,
 			);
 			projectDirPath = "";
 			projectRoot = "";
@@ -487,6 +494,13 @@
 		};
 /* End XCBuildConfiguration section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		DD0000000000000000000175 /* XCLocalSwiftPackageReference "vpdc" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../../vpdc;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCConfigurationList section */
 		DD0000000000000000000080 /* Build configuration list for PBXProject "VPhoneVirtualization" */ = {
 			isa = XCConfigurationList;
@@ -605,6 +619,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DD0000000000000000000174 /* XCRemoteSwiftPackageReference "libghostty-spm" */;
 			productName = GhosttyTerminal;
+		};
+		DD0000000000000000000208 /* VPDC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DD0000000000000000000175 /* XCLocalSwiftPackageReference "vpdc" */;
+			productName = VPDC;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

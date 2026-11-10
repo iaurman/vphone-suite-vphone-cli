@@ -381,13 +381,20 @@ public enum VPhoneBundleOperations {
     }
 
     /// Left out of every clone: snapshots record the source's history, not
-    /// the copy's, the control socket is the stopped source's, and a
-    /// template's record would make its clone a template that never boots.
+    /// the copy's, the control socket is the stopped source's, a template's
+    /// record would make its clone a template that never boots, and the port
+    /// mapping describes host ports on this Mac rather than the guest.
     private static let droppedFromClone: Set<String> = [
         VPhoneMachineSnapshots.directoryName,
         "vphone.sock",
         VPhoneMachineTemplates.recordFileName,
+        vpdPortMappingFileName,
     ]
+
+    /// The per-VM four-port reservation (`PLAN.md` §4): vpd's own file, which
+    /// must never travel with a machine. `VPDMappingExclusions` in the vpd
+    /// package names the same file and the same three rules.
+    static let vpdPortMappingFileName = "vpd-port-mapping.json"
 
     /// The network settings a new-identity clone drops, described for display.
     /// Each would collide with the source's when both run: a fixed address,
@@ -494,6 +501,8 @@ public enum VPhoneBundleOperations {
         // An imported machine is a full copy that shares no block with the
         // template its source was cloned from.
         VPhoneMachineTemplates.sourceFileName,
+        // vpd reallocates a block for the machine on this Mac.
+        vpdPortMappingFileName,
     ]
 
     /// The directory holding each boot-chain file exactly as the restore tree laid

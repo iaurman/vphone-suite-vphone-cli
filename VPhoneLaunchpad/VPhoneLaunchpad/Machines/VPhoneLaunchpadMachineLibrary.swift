@@ -73,6 +73,17 @@ final class VPhoneLaunchpadMachineLibrary {
         [libraryRoot] + addedRoots
     }
 
+    /// The installed Core Bundles. `bundles` is private; vpd's template clone
+    /// has to run the template's own bundle's `vphone-cli`.
+    var coreBundles: VPhoneLaunchpadCoreBundle {
+        bundles
+    }
+
+    /// Called before a machine is started, with the machine's path. vpd sets
+    /// it to reserve the VM's four host ports, so a start with no free block
+    /// fails before the guest boots (`PLAN.md` §4). A throw refuses the start.
+    var willStart: ((Path) async throws -> Void)?
+
     /// The selected machines, in list order.
     var selectedMachines: [VPhoneLaunchpadMachine] {
         machines.filter { selection.contains($0.id) }
@@ -472,6 +483,19 @@ final class VPhoneLaunchpadMachineLibrary {
     /// Starts a machine with its own bundle, after checking that bundle in
     /// this session (policy exception, host preflight and AMFI admission).
     func start(_ machine: Path, headless: Bool = false) async {
+        // Whatever must be true before the guest boots, such as a free block
+        // of host ports, is settled first.
+        if let willStart {
+            do {
+                try await willStart(machine)
+            } catch {
+                actionError = VPhoneLaunchpadError(
+                    String(localized: "Unable to Start \(machine.name)"),
+                    detail: VPhoneLaunchpadError.message(for: error),
+                )
+                return
+            }
+        }
         guard let version = bundleVersion(for: machine) else {
             actionError = VPhoneLaunchpadError(String(localized: "No Core Bundle version is installed. Install one in Core Bundle."))
             return

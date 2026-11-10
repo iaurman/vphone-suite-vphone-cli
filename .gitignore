@@ -356,3 +356,10 @@ setup_logs/
 VPhoneLaunchpad/Configuration/Developer.xcconfig
 VPhoneLaunchpad/Configuration/DevelopmentDeveloper.xcconfig
 .claude/worktrees
+
+# vp: derived data for this tree.
+#
+# ../build.sh points every xcodebuild at -derivedDataPath ../.build/..., so
+# normally nothing lands here. Nested project builds started by Xcode's build
+# phases (StageBundle.sh) use $root/.build, which is inside this checkout.
+.build/

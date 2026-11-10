@@ -734,6 +734,9 @@ public enum VPhoneMachineTemplates {
         let destination = url(of: build.identifier, in: build.libraryRoot)
         do {
             try removeIfPresent(build.bundleURL.appendingPathComponent("vphone.sock"))
+            // A template never boots, so it carries no host port block: the
+            // clone that comes out of it gets its own.
+            try removeIfPresent(build.bundleURL.appendingPathComponent(VPhoneBundleOperations.vpdPortMappingFileName))
             try renameExclusive(build.bundleURL, to: destination, identifier: build.identifier)
         } catch {
             record.frozen = false
@@ -816,6 +819,8 @@ public enum VPhoneMachineTemplates {
             // the machine while the record was written.
             try VPhoneBundleActivity.requireStopped(bundle)
             try removeIfPresent(bundle.url.appendingPathComponent("vphone.sock"))
+            // A template never boots, so it carries no host port block.
+            try removeIfPresent(bundle.url.appendingPathComponent(VPhoneBundleOperations.vpdPortMappingFileName))
             try renameExclusive(bundle.url, to: destination, identifier: record.identifier)
         } catch {
             if let previous {

@@ -44,6 +44,10 @@ final class VPhoneLaunchpadModel {
     /// The panel to open once the sheet on screen has closed.
     private var queuedPanel: Panel?
     private(set) var isStarted = false
+    /// vpd: the per-VM port reservations, the unix control socket and the REST
+    /// API over this model. Nil until `start()` has run, or when it could not
+    /// start.
+    private(set) var vpd: VPhoneLaunchpadVPD?
 
     init() {
         libraryRoot = URL(fileURLWithPath: VPhoneLaunchpadMachineLocations.defaultRoot, isDirectory: true)
@@ -135,6 +139,10 @@ final class VPhoneLaunchpadModel {
             await bundles.checkDefault()
         }
         await listed
+        // vpd publishes the machines over HTTP and allocates each VM's four
+        // ports. Started after the first list, so the machines that are
+        // already running can be re-adopted with the blocks they had.
+        startVPD()
         // An unfinished install reopens its own sheet instead.
         if panel == nil {
             if bundles.progress == nil || bundles.progress?.isFinished == true {
@@ -168,6 +176,33 @@ final class VPhoneLaunchpadModel {
     func refreshHost() async {
         await host.refresh()
         await leases.refresh()
+    }
+
+    // MARK: - vpd
+
+    /// Installs the per-user LaunchAgent and starts vpd over this model: the
+    /// unix socket, `0.0.0.0:6780` and the four-port allocations. Without it
+    /// the window works as before; a VM started from here then has no ports,
+    /// which vpdc reports as a bind failure.
+    func startVPD() {
+        guard vpd == nil else {
+            return
+        }
+        let runtime = VPhoneLaunchpadVPD(
+            library: machines,
+            leases: leases,
+            roots: machines.roots.map { URL(fileURLWithPath: $0, isDirectory: true) },
+        )
+        runtime.installLaunchAgent(appBundleAt: Bundle.main.bundleURL)
+        vpd = runtime
+        Task { await runtime.start() }
+    }
+
+    /// Called when Launchpad really quits. The reservations stay on disk, so
+    /// the ports are the same when it comes back.
+    func stopVPD() {
+        vpd?.stop()
+        vpd = nil
     }
 
     // MARK: - Machine requests

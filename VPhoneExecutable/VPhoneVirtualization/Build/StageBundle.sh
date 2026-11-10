@@ -91,6 +91,43 @@ done
 /bin/rm -rf "$frameworks/VPhonePatchKit.framework"
 /bin/cp -R "$command_products/VPhonePatchKit.framework" "$frameworks/VPhonePatchKit.framework"
 /bin/cp "$TARGET_BUILD_DIR/vphone-vm" "$macos/vphone-vm"
+# vpweb is the per-VM WebRTC gateway, spawned by vpdc inside vphone-vm. It is
+# built from the `vpdc-web` module and carries its own libopus
+# through @loader_path, because that library is not part of macOS. Its build
+# signs both files, which must happen before the bundle-wide codesign below.
+#
+# The sources live in the `vpdc-web` directory beside this checkout
+# (`11.new-vp/vpdc-web` next to `11.new-vp/vphone-cli`). The older layouts are
+# still probed so a checkout that predates the rename keeps building: a sibling
+# `vpweb` directory, and the `02.vphone-launchpad-dylibs` tree the sources used
+# to live in. VPHONE_VPWEB_SOURCE overrides all of them.
+#
+# The directory is `vpdc-web` but the gateway binary is still `vpweb`:
+# GatewayBinaryLocator, ValidateBundle.sh and the vpdc/VPDC options contract all
+# look for `vpweb` inside the bundle, so the name is not free to change with the
+# directory.
+candidates=(
+    "${VPHONE_VPWEB_SOURCE:-}"
+    "$root/../vpdc-web"
+    "$root/../02.vphone-launchpad-dylibs/vpweb"
+    "$root/../../vpweb"
+)
+vpweb_source=""
+for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -x "$candidate/Build/build.sh" ]]; then
+        vpweb_source="$candidate"
+        break
+    fi
+done
+if [[ -n "$vpweb_source" ]]; then
+    # Run from inside the module: `go build` resolves the package against the
+    # working directory's module, not against an absolute path outside it.
+    ( cd "$vpweb_source" && ./Build/build.sh --stage "$bundle" )
+else
+    print -u2 "Missing vpweb sources; looked in: ${(j:, :)candidates[2,-1]}"
+    exit 1
+fi
 # The terminal window's resources. libghostty is a static library, so nothing
 # is embedded for it, but GhosttyTerminal reads its Ghostty directory and its
 # compiled terminfo through Bundle.module. That searches Bundle.main's

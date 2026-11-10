@@ -8,6 +8,11 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
     private var vm: VPhoneVirtualMachine?
     private var control: VPhoneGuestControl?
     private var windowController: VPhoneVirtualMachineWindowController?
+    /// The VM's WebRTC side (PLAN.md §3). Nil for headless, DFU and template
+    /// launches, and while the windowed VM has not started yet.
+    private var vpdc: VPhoneVirtualMachineVPDC?
+    /// The display vpdc captures, held weakly for its capture queue.
+    private var vpdcDisplay: VPhoneVPDCDisplayBox?
     private var homePodDisplayTask: Task<Void, Never>?
     private var menuController: VPhoneMenuController?
     private var shellWindowController: VPhoneShellWindowController?
@@ -184,6 +189,7 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
             wc.captureView?.isTVGuest = options.isTVGuest
             wc.homeButtonHoldsInGuest = options.isTVGuest
             windowController = wc
+            startVPDC(vm: vm, options: options)
             if options.isHomePodGuest {
                 homePodDisplayTask = Task { [weak wc, weak control] in
                     // One snapshot in flight, with no queue of stale animation
@@ -420,6 +426,38 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
         hostAutomationServer = server
     }
 
+    /// The VM's WebRTC side: the port block vpd allocated, the three relays,
+    /// the H.264 stream from the windowed display, the audio tap and the
+    /// `vpweb` gateway this process spawns. Only a windowed launch has it.
+    @MainActor
+    private func startVPDC(vm: VPhoneVirtualMachine, options: VPhoneVirtualMachine.Options) {
+        let box = VPhoneVPDCDisplayBox()
+        box.display = vm.virtualMachine.graphicsDevices.first?.displays.first
+        vpdcDisplay = box
+        guard let vpdc = VPhoneVirtualMachineVPDC(
+            command: command,
+            options: options,
+            display: { box.display },
+        ) else {
+            return
+        }
+        self.vpdc = vpdc
+        // A guest-initiated stop exits the process from the VM's own queue,
+        // where `applicationWillTerminate` never runs: release the tap and
+        // the ports there instead.
+        vm.onGuestStopped = { [weak vpdc] in
+            vpdc?.stop()
+        }
+        // The window controller already polls vphoned's `display.orientation`;
+        // forward each change instead of polling a second time. The observer
+        // runs where `interfaceOrientation` is assigned, on the main actor.
+        control?.observeInterfaceOrientation { [weak vpdc] orientation in
+            guard let degrees = orientation?.rawValue, let vpdc else { return }
+            vpdc.guestOrientationChanged(rawDegrees: degrees)
+        }
+        vpdc.start()
+    }
+
     /// The guest shows the VM's name, the folder holding config.plist, as its
     /// device name. A VM name that cannot be one is not used, and the guest
     /// keeps its own.
@@ -514,6 +552,11 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func stopControlServices() {
+        // The audio tap and the four ports must not outlive the VM: vpdc also
+        // closes `vpweb`, its socket and the relays.
+        vpdc?.stop()
+        vpdc = nil
+        vpdcDisplay = nil
         homePodDisplayTask?.cancel()
         homePodDisplayTask = nil
         windowController?.clearHomePodDisplay()

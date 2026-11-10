@@ -30,6 +30,11 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
     /// The attachment the VM booted with, put back by `setNetworkLink(up: true)`
     /// after a runtime change.
     private var bootAttachment: VZNetworkDeviceAttachment?
+    /// Called on the VM's queue just before the process exits because the
+    /// guest stopped, by itself or with an error. The app delegate uses it to
+    /// release vpdc's audio tap and ports, which `applicationWillTerminate`
+    /// never reaches on this path. Written once at start, before any stop.
+    nonisolated(unsafe) var onGuestStopped: (@Sendable () -> Void)?
 
     struct Options {
         var configURL: URL
@@ -530,12 +535,14 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
     nonisolated func guestDidStop(_: VZVirtualMachine) {
         finishShaderCache()
         print("[vphone] Guest stopped")
+        onGuestStopped?()
         exit(EXIT_SUCCESS)
     }
 
     nonisolated func virtualMachine(_: VZVirtualMachine, didStopWithError error: Error) {
         finishShaderCache()
         print("[vphone] Stopped with error: \(error)")
+        onGuestStopped?()
         exit(EXIT_FAILURE)
     }
 

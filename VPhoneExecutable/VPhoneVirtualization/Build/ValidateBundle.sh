@@ -38,8 +38,39 @@ require_signed_macho() {
     }
 }
 
-for name in vphone-vm vphone-cli vphone-escalator libswiftCompatibilitySpan.vphone.dylib; do
+for name in vphone-vm vphone-cli vphone-escalator libswiftCompatibilitySpan.vphone.dylib \
+            vpweb; do
     require_signed_macho "$macos/$name"
+done
+# vpweb's own copy of libopus is not a system library: without the @loader_path
+# rewrite the gateway loads a Homebrew path, or nothing, and the failure only
+# shows up as a dyld error long after the build.
+#
+# The staged file's name is whatever vpweb's build staged (`libopus.0.dylib`
+# today, a new name after a major bump), so it is read from the load command
+# instead of pinned here: a renamed library is validated, not silently accepted
+# with a missing or stale file.
+opus_loads=()
+while IFS= read -r dependency; do
+    case "$dependency" in
+        @loader_path/libopus.*.dylib) opus_loads+=("$dependency") ;;
+    esac
+done < <(/usr/bin/otool -L "$macos/vpweb" | /usr/bin/awk 'NR > 1 { print $1 }')
+(( ${#opus_loads} == 1 )) || {
+    print -u2 "vpweb must load exactly one @loader_path/libopus.*.dylib, found ${#opus_loads}"
+    exit 1
+}
+opus_name="${${opus_loads[1]}#@loader_path/}"
+[[ -f "$macos/$opus_name" ]] || {
+    print -u2 "Missing library vpweb loads: Contents/MacOS/$opus_name"
+    exit 1
+}
+require_signed_macho "$macos/$opus_name"
+for stale in "$macos"/libopus.*.dylib(N); do
+    [[ "${stale:t}" == "$opus_name" ]] || {
+        print -u2 "Stale library in Contents/MacOS: ${stale:t} (vpweb loads $opus_name)"
+        exit 1
+    }
 done
 require_signed_macho "$frameworks/VPhonePatchKit.framework/Versions/A/VPhonePatchKit"
 # The terminal reads these through Bundle.module, which searches
@@ -78,6 +109,13 @@ done
 # bundle and refuses the microphone to one with no usage description.
 /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$bundle/Contents/Info.plist" >/dev/null 2>&1 || {
     print -u2 "VPhone.bundle has no microphone usage description"
+    exit 1
+}
+# vpweb binds 0.0.0.0:<base> TCP and UDP for every windowed VM, and vpdc the
+# relay ports beside it. macOS 15 asks for Local Network access the first time,
+# and refuses silently without the description.
+/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$bundle/Contents/Info.plist" >/dev/null 2>&1 || {
+    print -u2 "VPhone.bundle has no local network usage description"
     exit 1
 }
 for language in en zh-Hans ja ko vi; do
