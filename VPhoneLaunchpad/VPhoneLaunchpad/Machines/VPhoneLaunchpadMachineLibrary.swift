@@ -873,6 +873,12 @@ final class VPhoneLaunchpadMachineLibrary {
     /// When the machine was the last one cloned from a template, `vm delete`
     /// says so and leaves the template; `templateNotice` passes that on.
     func delete(_ machine: Path) async {
+        // The child runs for the whole removal and the main actor is free
+        // meanwhile, so vpd's listing can run for this machine in that window.
+        // `isBeingDeleted` is how it stays away (see `listVMs`): a mapping it
+        // wrote would put the folder back after the walk removed it.
+        deletions.insert(machine)
+        defer { deletions.remove(machine) }
         do {
             let result = try await performChecked(
                 String(localized: "Deleting…"),
@@ -891,6 +897,20 @@ final class VPhoneLaunchpadMachineLibrary {
                 actionError = VPhoneLaunchpadError(actionFailure: error)
             }
         }
+    }
+
+    /// The machines whose `vm delete` child is running right now, for vpd's
+    /// listing to skip: the main actor is free while the child runs, so a
+    /// refresh can allocate ports for a machine whose folder is going away, and
+    /// the mapping it writes would recreate the folder the delete is removing.
+    ///
+    /// The mark lives here rather than in the vpd model because the window's own
+    /// delete button calls `delete(_:)` too, and only the library sees both
+    /// callers.
+    private(set) var deletions: Set<Path> = []
+
+    func isBeingDeleted(_ machine: Path) -> Bool {
+        deletions.contains(machine)
     }
 
     /// The template the last deleted machine was cloned from, now used by

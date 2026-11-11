@@ -286,6 +286,56 @@ public enum VPhoneBundleOperations {
         try VPhoneDirectoryRemoval.remove(bundle.url)
     }
 
+    // MARK: - Leftover folders
+
+    /// What a folder that no longer holds a machine may still contain and be
+    /// removed by ``deleteLeftoverMachineDirectory(named:in:)``: vpd's own
+    /// reservation file, and Finder's metadata for browsing it. Anything else
+    /// means the folder is not just what a delete left behind.
+    static let leftoverNames: Set<String> = [vpdPortMappingFileName, ".DS_Store"]
+
+    /// Removes a machine folder that has no `config.plist` left in it.
+    ///
+    /// A delete that did not finish can leave `<library>/<name>` holding
+    /// nothing but `vpd-port-mapping.json`. (v3.1.11 could: vpd re-wrote the
+    /// reservation into a folder `vm delete` was walking, so the removal
+    /// failed with `ENOTEMPTY` and the folder kept the name and four reserved
+    /// ports.) Nothing can load that folder as a bundle, so
+    /// ``delete(bundleNamed:in:)`` answers `notFound`, and `vm list` does not
+    /// show it either: without this, it could never be deleted.
+    ///
+    /// This removes exactly such a folder, and refuses everything else:
+    ///
+    /// - It must be a real directory named by one validated component straight
+    ///   under the library root. A symbolic link is refused, never followed,
+    ///   and the removal itself unlinks links inside the folder instead of
+    ///   descending into them.
+    /// - It must hold nothing but ``leftoverNames``. A folder with a
+    ///   `Disk.img`, a `config.plist` that failed to load, a snapshot, or any
+    ///   other entry is not treated as a leftover: it may still be a machine,
+    ///   so it goes through ``delete(bundleNamed:in:)`` (which refuses a running
+    ///   one) or is removed by hand.
+    public static func deleteLeftoverMachineDirectory(
+        named name: String,
+        in library: VPhoneLibrary,
+    ) throws {
+        try requireValidName(name)
+        let directory = library.url(forName: name)
+        // A missing entry makes `resourceValues` throw, which is the `notFound`
+        // this answers anyway; a link to a directory would read as one, so the
+        // link is checked separately.
+        let values = try? directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values?.isDirectory == true, values?.isSymbolicLink != true else {
+            throw VPhoneLibraryError.notFound(name: name)
+        }
+        let entries = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        let unexpected = entries.filter { !leftoverNames.contains($0) }.sorted()
+        guard unexpected.isEmpty else {
+            throw VPhoneLibraryError.notALeftover(name: name, entries: unexpected)
+        }
+        try VPhoneDirectoryRemoval.remove(directory)
+    }
+
     // MARK: - Clone
 
     /// Copy the whole bundle, using APFS copy-on-write when available. The

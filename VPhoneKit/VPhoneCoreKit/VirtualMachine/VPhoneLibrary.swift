@@ -4,6 +4,10 @@ public enum VPhoneLibraryError: Error, Equatable {
     case notFound(name: String)
     case alreadyExists(name: String)
     case invalidName(String)
+    /// A folder with no `config.plist` that holds more than a delete could have
+    /// left behind, so `vm delete` refuses to remove it as a leftover. `entries`
+    /// is what else is in it.
+    case notALeftover(name: String, entries: [String])
 }
 
 extension VPhoneLibraryError: CustomStringConvertible, LocalizedError {
@@ -13,6 +17,11 @@ extension VPhoneLibraryError: CustomStringConvertible, LocalizedError {
         case let .alreadyExists(name): "VM '\(name)' already exists. Choose a different name."
         case let .invalidName(name):
             "Invalid VM name '\(name)'. Use a name that is not empty, has no '/', and does not start with '.'."
+        case let .notALeftover(name, entries):
+            "VM '\(name)' has no config.plist, so it cannot be deleted as a machine, "
+                + "and its folder holds more than a leftover port mapping: "
+                + "\(entries.joined(separator: ", ")). "
+                + "Restore its config.plist to delete it as a machine, or remove those files first."
         }
     }
 

@@ -78,6 +78,28 @@ final class VPDLaunchpadModel: VPDModel {
 
         var rows: [VPDVM] = []
         for machine in library.machines {
+            // A machine being deleted, or one whose folder is gone, is not a
+            // machine to allocate for. Both checks matter: `vm delete` runs as
+            // a child process and the main actor suspends for the whole
+            // removal, so this loop (the five-second refresh, vpcenter's
+            // `GET /api/vms`, the start-page reconcile) can run while the
+            // folder is gone or going. Writing a mapping then would create the
+            // folder again and fail the removal with `ENOTEMPTY`, leaving an
+            // orphan that held only `vpd-port-mapping.json` while the API
+            // still answered 204.
+            //
+            // Why the library's in-memory mark instead of a lock file: the
+            // only writer of a mapping is this process — `vphone-cli vm delete`
+            // removes files and never writes one, and vpcenter/vpdc reach the
+            // store over HTTP and the socket, both served from here. A shared
+            // `flock` would have to be honoured by a child that does no mapping
+            // I/O at all, and would leave a lock file next to every library, so
+            // the mark closes the race that exists with much less. A second vpd
+            // pointed at the same library is not covered by it; for that,
+            // `VPDPortMappingStore.write` refuses a missing folder and the
+            // removal lists the folder again when `rmdir` says it is not empty.
+            guard !library.isBeingDeleted(machine.path) else { continue }
+            guard FileManager.default.fileExists(atPath: machine.path.url.path) else { continue }
             // Every machine has a block, not only one that has already booted:
             // the mapping is the machine's own identity (a clone gets a fresh
             // one, disjoint from its source), and the window always has a port
@@ -331,6 +353,10 @@ final class VPDLaunchpadModel: VPDModel {
     /// the machine itself, and a delete that silently did nothing is worse
     /// than one that also stops it. A machine that will not stop refuses with
     /// the stop's own error.
+    ///
+    /// Success means the machine's folder is gone, not that its row is: a
+    /// folder left behind keeps the name and the four ports reserved, so it is
+    /// an error, not a 204 (see the folder check at the end).
     func deleteVM(named name: String) async throws {
         if try template(named: name) != nil {
             // The HTTP layer answers 409 first; this is the model's own guard.
@@ -351,13 +377,32 @@ final class VPDLaunchpadModel: VPDModel {
                     ?? "Unable to stop \(name) before deleting it."
             )
         }
+
+        // While this runs the main actor is suspended on the child process, so
+        // `listVMs` may run for the same machine; `library.delete` marks it as
+        // being deleted for exactly that window. The reservation file goes
+        // first, so the store is not holding a file it would rewrite inside a
+        // folder the removal is walking; a failed delete only costs the block,
+        // which `ensureMapping` hands out again on the next use.
+        _ = try? VPDMappingExclusions.removeMapping(inMachineDirectory: existing.path.url)
+
         library.actionError = nil
         await library.delete(existing.path)
-        guard self.machine(named: name) == nil else {
+        // The machine row is not the evidence: `library.machines` only lists
+        // folders with a `config.plist`, and `vm delete` can remove a folder
+        // while leaving the list unchanged. The folder itself is what a delete
+        // promises to remove — a leftover `vpd-port-mapping.json` folder would
+        // otherwise keep the name and four ports reserved forever while this
+        // answered success.
+        guard !FileManager.default.fileExists(atPath: existing.path.url.path) else {
             throw VPDModelError.unavailable(
-                library.actionError?.localizedDescription ?? "The machine was not deleted."
+                library.actionError?.localizedDescription
+                    ?? "The folder of \(name) is still there after the delete."
             )
         }
+        // Drop the row now rather than at the next five-second refresh: the
+        // name is free again, and nothing should offer the machine.
+        await library.refresh()
     }
 
     // MARK: Ports and address

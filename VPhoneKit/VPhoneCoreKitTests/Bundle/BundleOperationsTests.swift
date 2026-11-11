@@ -537,6 +537,79 @@ struct BundleOperationsTests {
         }
     }
 
+    // MARK: - Leftover folders
+
+    /// The folder a failed delete can leave behind: no `config.plist`, only
+    /// vpd's reservation file. Nothing can load it as a bundle, so this is the
+    /// one path that removes it — and it must leave nothing behind either.
+    @Test func `delete removes a leftover folder holding only the port mapping`() throws {
+        let root = try makeRoot()
+        defer {
+            try? VPhoneDirectoryRemoval.remove(root)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let lib = VPhoneLibrary(root: root)
+        let folder = lib.url(forName: "orphan-test")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try Data(#"{"vm":"orphan-test","basePort":7000}"#.utf8)
+            .write(to: folder.appendingPathComponent(VPhoneBundleOperations.vpdPortMappingFileName))
+
+        try VPhoneBundleOperations.deleteLeftoverMachineDirectory(named: "orphan-test", in: lib)
+
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(try lib.bundles().isEmpty)
+    }
+
+    /// A folder that still holds a disk image is a machine, not the remains of
+    /// a delete: removing it blind could lose a guest's data.
+    @Test func `leftover delete refuses a folder that is more than a leftover`() throws {
+        let root = try makeRoot()
+        defer {
+            try? VPhoneDirectoryRemoval.remove(root)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let lib = VPhoneLibrary(root: root)
+        let folder = lib.url(forName: "damaged")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try Data(#"{"vm":"damaged","basePort":7000}"#.utf8)
+            .write(to: folder.appendingPathComponent(VPhoneBundleOperations.vpdPortMappingFileName))
+        try Data([0]).write(to: folder.appendingPathComponent("Disk.img"))
+
+        #expect(throws: VPhoneLibraryError.notALeftover(name: "damaged", entries: ["Disk.img"])) {
+            try VPhoneBundleOperations.deleteLeftoverMachineDirectory(named: "damaged", in: lib)
+        }
+        #expect(FileManager.default.fileExists(atPath: folder.path), "the folder is left alone")
+        #expect(FileManager.default.fileExists(
+            atPath: folder.appendingPathComponent("Disk.img").path,
+        ))
+    }
+
+    /// A link in the library is not a machine folder, and the delete never
+    /// follows one: what it points at stays.
+    @Test func `leftover delete refuses a symbolic link`() throws {
+        let root = try makeRoot()
+        let outside = try makeRoot()
+        defer {
+            try? VPhoneDirectoryRemoval.remove(root)
+            try? FileManager.default.removeItem(at: root)
+            try? VPhoneDirectoryRemoval.remove(outside)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let lib = VPhoneLibrary(root: root)
+        let real = outside.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false)
+        try Data([7]).write(to: real.appendingPathComponent("keep.bin"))
+        try FileManager.default.createSymbolicLink(
+            at: lib.url(forName: "linked"),
+            withDestinationURL: real,
+        )
+
+        #expect(throws: VPhoneLibraryError.notFound(name: "linked")) {
+            try VPhoneBundleOperations.deleteLeftoverMachineDirectory(named: "linked", in: lib)
+        }
+        #expect(FileManager.default.fileExists(atPath: real.appendingPathComponent("keep.bin").path))
+    }
+
     @Test func `clone preserves bundle contents and keeps copy independent`() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

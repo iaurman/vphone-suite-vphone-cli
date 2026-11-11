@@ -128,13 +128,32 @@ public enum VPhoneDirectoryRemoval {
         // An immutable or unwritable directory refuses the removal of what is
         // inside it, so the repair comes first.
         repair(directory)
-        let children = try list(directory, path: path)
-        for child in children {
-            let childPath = path.hasSuffix("/") ? path + describe(child) : path + "/" + describe(child)
-            try removeEntry(named: child, in: directory, path: childPath, mayDropParentACL: true)
+        // The folder can gain an entry between the listing and the `rmdir`: vpd
+        // rewrites a machine's port reservation, a backup tool writes a file,
+        // another instance of the app allocates one. That entry is what made a
+        // delete fail with "Directory not empty" and leave the folder behind,
+        // so the listing is taken again while `rmdir` keeps answering
+        // `ENOTEMPTY`, up to `removalPasses` times. A folder that keeps growing
+        // is given up on instead of looped over forever; the refusal then names
+        // the folder that survived.
+        for _ in 0..<Self.removalPasses {
+            let children = try list(directory, path: path)
+            for child in children {
+                let childPath = path.hasSuffix("/") ? path + describe(child) : path + "/" + describe(child)
+                try removeEntry(named: child, in: directory, path: childPath, mayDropParentACL: true)
+            }
+            if unlinkat(parent, name, AT_REMOVEDIR) == 0 {
+                return
+            }
+            guard errno == ENOTEMPTY else { break }
         }
         try unlink(named: name, in: parent, directory: true, path: path, mayDropParentACL: mayDropParentACL)
     }
+
+    /// How many times a directory is listed again when `rmdir` reports that it
+    /// is not empty. Three is the walk, one retry for an entry that appeared,
+    /// and one more so a short burst of writes still ends removed.
+    private static let removalPasses = 3
 
     /// Every name in `directory` except `.` and `..`, as null-terminated C
     /// strings, read into a snapshot so entries can be removed while the walk

@@ -476,6 +476,18 @@ struct VPhoneVirtualMachineDeleteCommand: ParsableCommand {
                 return
             }
         }
+        // A folder that lost its `config.plist` (an interrupted delete, older
+        // than the `ENOTEMPTY` fix) cannot be loaded as a bundle, so the normal
+        // path answers notFound and the folder would keep its name and its
+        // reserved host ports forever. The fallback removes that folder, and
+        // only one that holds nothing but vpd's reservation file; see
+        // `deleteLeftoverMachineDirectory`.
+        let folder = lib.library.url(forName: name)
+        guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("config.plist").path) else {
+            try VPhoneBundleOperations.deleteLeftoverMachineDirectory(named: name, in: lib.library)
+            print("deleted \(name) (leftover folder: it held no machine)")
+            return
+        }
         let source = try VPhoneMachineTemplates.readSource(inBundle: lib.library.bundle(named: name).url)
         try VPhoneBundleOperations.delete(bundleNamed: name, in: lib.library)
         print("deleted \(name)")
