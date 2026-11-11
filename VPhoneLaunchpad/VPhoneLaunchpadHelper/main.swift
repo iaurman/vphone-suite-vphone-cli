@@ -7,6 +7,10 @@ import Foundation
 // authorization right, written here as root before any connection arrives.
 
 VPhoneLaunchpadHelperAuthorization.registerRight()
+// This process is root, so it installs the boot-time AMFI allow itself: the
+// next launch, and the next boot, then need no administrator. It writes only
+// when something changed, so a start that has nothing to do touches nothing.
+try? VPhoneLaunchpadHelperBootScript.install()
 let delegate = VPhoneLaunchpadHelperListenerDelegate()
 let listener = NSXPCListener(machServiceName: VPhoneLaunchpadHelperIdentity.machServiceName)
 listener.delegate = delegate

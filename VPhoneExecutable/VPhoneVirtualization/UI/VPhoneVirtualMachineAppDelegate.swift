@@ -13,6 +13,9 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
     private var vpdc: VPhoneVirtualMachineVPDC?
     /// The display vpdc captures, held weakly for its capture queue.
     private var vpdcDisplay: VPhoneVPDCDisplayBox?
+    /// The guest-orientation poll a headless launch runs in place of the window
+    /// controller's, so a WebRTC viewer still learns the guest turned.
+    private var orientationPoll: VPhoneGuestOrientationPoll?
     private var homePodDisplayTask: Task<Void, Never>?
     private var menuController: VPhoneMenuController?
     private var shellWindowController: VPhoneShellWindowController?
@@ -461,6 +464,22 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
             guard let degrees = orientation?.rawValue, let vpdc else { return }
             vpdc.guestOrientationChanged(rawDegrees: degrees)
         }
+        // No window controller means nothing assigns `interfaceOrientation`, so
+        // the observer above never fires and a viewer never learns the turn.
+        // The headless launch polls the guest itself, at the window's cadence.
+        if VPhoneOrientationPolling.needsOwnPoll(headless: command.headless),
+           let control
+        {
+            orientationPoll = VPhoneGuestOrientationPoll(
+                control: control,
+                intervalSeconds: VPhoneOrientationPolling.intervalSeconds(
+                    foldableGuest: options.isFoldableGuest,
+                ),
+            ) { [weak vpdc] degrees in
+                vpdc?.guestOrientationChanged(rawDegrees: degrees)
+            }
+            orientationPoll?.start()
+        }
         vpdc.start()
     }
 
@@ -560,6 +579,8 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
     private func stopControlServices() {
         // The audio tap and the four ports must not outlive the VM: vpdc also
         // closes `vpweb`, its socket and the relays.
+        orientationPoll?.stop()
+        orientationPoll = nil
         vpdc?.stop()
         vpdc = nil
         vpdcDisplay = nil

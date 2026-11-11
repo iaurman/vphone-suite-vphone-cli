@@ -137,6 +137,12 @@ final class VPhoneLaunchpadModel {
             await host.installHelper()
             await host.refresh()
             await bundles.checkDefault()
+        } else {
+            // A ready helper installs the boot-time AMFI allow itself when it
+            // starts; this covers a helper that was already running from
+            // before an update, so the script is in place without waiting for
+            // the next reboot. It writes nothing when the script is current.
+            try? await helper.installAMFIBootScript()
         }
         await listed
         // vpd publishes the machines over HTTP and allocates each VM's four

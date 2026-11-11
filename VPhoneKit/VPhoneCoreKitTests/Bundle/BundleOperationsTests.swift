@@ -370,6 +370,149 @@ struct BundleOperationsTests {
         #expect(try lib.bundles().isEmpty)
     }
 
+    // MARK: - Delete
+
+    /// The folder of a machine that is stopped, with a copy of its
+    /// `config.plist` so `VPhoneLibrary.bundle(named:)` can load it.
+    private func makeStoppedMachine(named name: String, in root: URL) throws -> VPhoneLibrary {
+        let lib = VPhoneLibrary(root: root)
+        let rom = try fakeROM()
+        defer { try? FileManager.default.removeItem(at: rom) }
+        _ = try VPhoneBundleOperations.create(
+            .init(name: name, cpuCount: 2, memoryMB: 2048, diskSizeGB: 1, romSource: rom, sepromSource: rom),
+            in: lib,
+        )
+        return lib
+    }
+
+    /// Nothing a guest or a backup tool leaves behind may survive a delete: an
+    /// immutable file, a read-only folder, a Unix socket, and a symlink out of
+    /// the machine are all removed, and the folder with them.
+    @Test func `delete removes an immutable file and a read-only folder`() throws {
+        let root = try makeRoot()
+        defer {
+            // The test's own repair, in case an assertion fires first.
+            try? VPhoneDirectoryRemoval.remove(root)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let lib = try makeStoppedMachine(named: "stubborn", in: root)
+        let dir = lib.url(forName: "stubborn")
+
+        // `chflags uchg` on a file: unlink then fails with EPERM.
+        let immutable = dir.appendingPathComponent("Pinned.bin")
+        try Data([1, 2, 3]).write(to: immutable)
+        #expect(chflags(immutable.path, UInt32(UF_IMMUTABLE)) == 0)
+
+        // A read-only folder holding a file: its contents cannot be unlinked.
+        let locked = dir.appendingPathComponent("Locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+        try Data([4]).write(to: locked.appendingPathComponent("inside.bin"))
+        #expect(chmod(locked.path, 0o500) == 0)
+
+        // A leftover control socket, which `removeItem` deletes but a naive
+        // walk over regular files would skip.
+        let socketPath = dir.appendingPathComponent("vphone.sock").path
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(fd >= 0)
+        if fd >= 0 {
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+            withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: 104) { path in
+                    _ = strlcpy(path, socketPath, 104)
+                }
+            }
+            let bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            #expect(bound == 0)
+            close(fd)
+        }
+
+        // A symlink out of the machine is removed as a link, never followed.
+        let outside = root.appendingPathComponent("outside.txt")
+        try Data([9]).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: dir.appendingPathComponent("escape"),
+            withDestinationURL: outside,
+        )
+
+        try VPhoneBundleOperations.delete(bundleNamed: "stubborn", in: lib)
+
+        let fm = FileManager.default
+        #expect(!fm.fileExists(atPath: dir.path), "the machine folder must be gone")
+        // What the link pointed at is untouched.
+        #expect(try Data(contentsOf: outside) == Data([9]))
+        #expect(try lib.bundles().isEmpty)
+    }
+
+    /// A refusal is a `VPhoneDirectoryRemovalError` that names the path, so the
+    /// caller can say what is left rather than "the delete failed".
+    @Test func `delete of a missing machine is notFound`() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lib = VPhoneLibrary(root: root)
+        #expect(throws: VPhoneLibraryError.notFound(name: "ghost")) {
+            try VPhoneBundleOperations.delete(bundleNamed: "ghost", in: lib)
+        }
+    }
+
+    /// A machine whose disk only a *reader* holds is still deleted: unlinking
+    /// a file another process has open is what a delete means, and refusing
+    /// there is the bug this change removes. (A VM process is refused by
+    /// `requireNotRunning`; the socket test below drives that path.)
+    @Test func `delete proceeds when only a reader holds the disk`() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lib = try makeStoppedMachine(named: "held", in: root)
+        let disk = lib.url(forName: "held").appendingPathComponent("Disk.img")
+
+        let fd = open(disk.path, O_RDONLY)
+        #expect(fd >= 0)
+        defer { if fd >= 0 { close(fd) } }
+        let holders = VPhoneBundleActivity.processesHolding([disk])
+        #expect(holders.contains(getpid()))
+        try VPhoneBundleOperations.delete(bundleNamed: "held", in: lib)
+        #expect(!FileManager.default.fileExists(atPath: lib.url(forName: "held").path))
+    }
+
+    /// `requireNotRunning` names the process when it does refuse.
+    @Test func `requireNotRunning refuses a live control socket`() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lib = try makeStoppedMachine(named: "sock", in: root)
+        let dir = lib.url(forName: "sock")
+        let socketPath = dir.appendingPathComponent("vphone.sock").path
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(fd >= 0)
+        guard fd >= 0 else { return }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: 104) { path in
+                _ = strlcpy(path, socketPath, 104)
+            }
+        }
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        defer { close(fd) }
+        #expect(bound == 0)
+        guard bound == 0 else { return }
+        // Listen, so `connect` succeeds and the socket reads as a live VM.
+        #expect(listen(fd, 1) == 0)
+        #expect(throws: VPhoneBundleActivityError.self) {
+            try VPhoneBundleOperations.delete(bundleNamed: "sock", in: lib)
+        }
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+    }
+
     @Test func `rename rejects existing target`() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

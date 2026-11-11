@@ -88,6 +88,28 @@ public enum VPhoneBundleActivity {
         }
     }
 
+    // MARK: - Deleting
+
+    /// Throws `VPhoneBundleActivityError.running` only when a process that
+    /// *runs* the machine holds it, or its control socket is live.
+    ///
+    /// Deleting differs from cloning: a file another program has open can be
+    /// unlinked, which is what deleting means, so a reader never refuses. A
+    /// running VM does refuse: the guest is still writing its disk, and a
+    /// folder taken apart under it fails half way. vpd stops the machine
+    /// before it calls this; `vm delete` lets the refusal speak for itself.
+    public static func requireNotRunning(_ bundle: VPhoneBundle) throws {
+        let urls = stateFileNames(of: bundle).map { bundle.url.appendingPathComponent($0) }
+        let socket = bundle.url.appendingPathComponent("vphone.sock")
+        let holders = processesHolding(urls).map { VPhoneProcessHolder(pid: $0) }
+        if let running = holders.first(where: \.runsMachine) {
+            throw VPhoneBundleActivityError.running(name: bundle.name, holders: [running])
+        }
+        if controlSocketIsLive(socket) {
+            throw VPhoneBundleActivityError.running(name: bundle.name, holders: holders)
+        }
+    }
+
     // MARK: - Processes
 
     /// The processes of this user that have any of `urls` open, sorted. One

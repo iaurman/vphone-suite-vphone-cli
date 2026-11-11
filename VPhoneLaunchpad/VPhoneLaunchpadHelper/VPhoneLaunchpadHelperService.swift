@@ -78,6 +78,23 @@ final class VPhoneLaunchpadHelperService: NSObject, VPhoneLaunchpadHelperProtoco
         }
     }
 
+    func virtualMachineIsAllowed(bundleVersion: String, reply: @escaping @Sendable (Bool) -> Void) {
+        work.async {
+            reply(VPhoneLaunchpadHelperAMFI.isAllowed(bundleVersion: bundleVersion))
+        }
+    }
+
+    func installAMFIBootScript(reply: @escaping @Sendable (String?) -> Void) {
+        work.async {
+            do {
+                try VPhoneLaunchpadHelperBootScript.install()
+                reply(nil)
+            } catch {
+                reply(error.localizedDescription)
+            }
+        }
+    }
+
     // MARK: - CFW install
 
     func installCustomFirmware(

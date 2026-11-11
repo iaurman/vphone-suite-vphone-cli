@@ -264,9 +264,26 @@ public enum VPhoneBundleOperations {
             : nil
     }
 
+    /// Removes the machine's folder, and with it every file of the machine.
+    ///
+    /// Unlike clone and revert, deletion does not need the files to stand
+    /// still: unlinking a file a backup tool is reading is what a delete does.
+    /// It does need the machine to be stopped, so a still-booting guest cannot
+    /// keep writing into a folder that is being taken apart.
+    ///
+    /// vpd stops a running machine before it calls this
+    /// (`VPDLaunchpadModel.deleteVM`); `vm delete` does not, and a machine that
+    /// is still running refuses with `VPhoneBundleActivityError` so the user
+    /// is told to stop it. Launchpad's own delete button is already disabled
+    /// for a running machine.
+    ///
+    /// The removal itself repairs what `FileManager.removeItem` gives up on
+    /// (an immutable file, a read-only folder, an ACL, a leftover socket); see
+    /// ``VPhoneDirectoryRemoval``.
     public static func delete(bundleNamed name: String, in library: VPhoneLibrary) throws {
-        let url = try library.bundle(named: name).url
-        try FileManager.default.removeItem(at: url)
+        let bundle = try library.bundle(named: name)
+        try VPhoneBundleActivity.requireNotRunning(bundle)
+        try VPhoneDirectoryRemoval.remove(bundle.url)
     }
 
     // MARK: - Clone

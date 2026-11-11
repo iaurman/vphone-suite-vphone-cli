@@ -45,6 +45,19 @@ nonisolated protocol VPhoneLaunchpadHelperProtocol {
     /// AMFI, using that bundle's vphone-escalator as root.
     func allowVirtualMachine(authorization: Data, bundleVersion: String, reply: @escaping @Sendable (String?) -> Void)
 
+    /// Whether AMFI already admits the bundle's `vphone-vm`: amfid holds the
+    /// preference's requirement and the preference names that cdhash. Reads
+    /// only, so it needs no authorization and prompts for nobody — the app
+    /// asks this first and skips `allowVirtualMachine` when the answer is
+    /// yes, which is the normal case once the boot script has run.
+    func virtualMachineIsAllowed(bundleVersion: String, reply: @escaping @Sendable (Bool) -> Void)
+
+    /// Installs or refreshes the boot-time AMFI allow: the LaunchDaemon and the
+    /// script that re-adopts the coderequirements preference as root at boot.
+    /// Done by the helper at start, which it can do without a prompt because it
+    /// already runs as root.
+    func installAMFIBootScript(reply: @escaping @Sendable (String?) -> Void)
+
     /// Runs `vphone-cli cfw install` from a store bundle as root, on behalf of
     /// the calling user. Output lines arrive through
     /// `VPhoneLaunchpadHelperClientProtocol` on the connection that made the

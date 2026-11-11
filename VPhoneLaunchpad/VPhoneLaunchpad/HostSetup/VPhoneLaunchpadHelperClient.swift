@@ -227,6 +227,41 @@ final class VPhoneLaunchpadHelperClient {
         }
     }
 
+    /// Whether AMFI already admits the bundle, asked of the helper. Reads
+    /// only, so it never prompts; false when the helper cannot answer, which
+    /// makes the caller take the path that may.
+    func virtualMachineIsAllowed(bundleVersion: String) async -> Bool {
+        await refresh()
+        if case .outdated = state {
+            try? await install()
+        }
+        guard case .ready = state else { return false }
+        let answer: Bool? = try? await withTimeout(seconds: 5) { proxy, done in
+            proxy.virtualMachineIsAllowed(bundleVersion: bundleVersion) { done(.success($0)) }
+        }
+        return answer ?? false
+    }
+
+    /// Asks the helper to write the boot-time AMFI allow, which it does as
+    /// root without an administrator because nothing about the request is
+    /// privileged: only a root-owned file this build pins is written.
+    func installAMFIBootScript() async throws {
+        await refresh()
+        if case .outdated = state {
+            try await install()
+        }
+        guard case .ready = state else {
+            throw VPhoneLaunchpadError(
+                String(localized: "Update the privileged helper in Host Setup, then try again."),
+            )
+        }
+        try await call { proxy, done in
+            proxy.installAMFIBootScript { message in
+                done(message.map { VPhoneLaunchpadError($0) })
+            }
+        }
+    }
+
     func allowVirtualMachine(bundleVersion: String) async throws {
         await refresh()
         if case .outdated = state {
@@ -236,6 +271,12 @@ final class VPhoneLaunchpadHelperClient {
             throw VPhoneLaunchpadError(
                 String(localized: "Update the privileged helper in Host Setup, then run preflight again."),
             )
+        }
+        // Nothing to do when the bundle is already allowed: that is the normal
+        // case, and asking for an administrator there is the prompt this
+        // avoids. A bundle whose cdhash is new still asks, as it must.
+        if await virtualMachineIsAllowed(bundleVersion: bundleVersion) {
+            return
         }
         let authorization = try await authorizationSession.externalForm()
         try await call { proxy, done in

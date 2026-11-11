@@ -127,7 +127,11 @@ final class VPDLaunchpadModel: VPDModel {
         _ = try store.ensureMapping(forVM: machine.name)
 
         library.actionError = nil
-        await library.start(machine.path)
+        // A VM started by vpd (the start page, vpcenter or vpdc-web) is a
+        // WebRTC-only customer: it does not need a VZVirtualMachineView on the
+        // host. The Launchpad GUI calls `library.start` itself with the
+        // default `headless: false`, so it keeps its window choice.
+        await library.start(machine.path, headless: true)
         // `start` reports its failure through `actionError`, not by throwing.
         guard library.state(of: machine.path) == .running else {
             throw VPDModelError.unavailable(
@@ -322,6 +326,11 @@ final class VPDLaunchpadModel: VPDModel {
         throw VPDModelError.notFound(name: name)
     }
 
+    /// Deletes a machine. A running one is stopped first: the vpd API is the
+    /// one surface where a caller cannot be expected to know it has to stop
+    /// the machine itself, and a delete that silently did nothing is worse
+    /// than one that also stops it. A machine that will not stop refuses with
+    /// the stop's own error.
     func deleteVM(named name: String) async throws {
         if try template(named: name) != nil {
             // The HTTP layer answers 409 first; this is the model's own guard.
@@ -329,6 +338,18 @@ final class VPDLaunchpadModel: VPDModel {
         }
         guard let existing = machine(named: name) else {
             throw VPDModelError.notFound(name: name)
+        }
+        // `library.stop` asks the guest first and falls back to `vm stop`, the
+        // same pair the Stop button uses.
+        if library.state(of: existing.path) != .stopped {
+            library.actionError = nil
+            await library.stop(existing.path)
+        }
+        guard library.state(of: existing.path) == .stopped else {
+            throw VPDModelError.unavailable(
+                library.actionError?.localizedDescription
+                    ?? "Unable to stop \(name) before deleting it."
+            )
         }
         library.actionError = nil
         await library.delete(existing.path)
