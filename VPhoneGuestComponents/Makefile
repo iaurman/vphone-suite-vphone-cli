@@ -43,8 +43,8 @@ LAUNCHHOOK := $(STAGE)/launchhook/launchdhook-vphone.dylib
 LAUNCHHOOK_SOURCES := $(wildcard LaunchHook/*.c) Shared/RootHideLoaderLinks.c Shared/VPhoneX1Spawn.c Shared/VPhoneMachPortsCompat.c
 LAUNCHHOOK_INCLUDES := $(wildcard LaunchHook/*.h LaunchHook/*.inc Shared/*.h)
 SYSTEMHOOK := $(STAGE)/systemhook/SystemHook-vphone.dylib
-SYSTEMHOOK_SOURCES := $(wildcard SystemHook/*.c) $(wildcard FlutterRemapFix/*.c) Shared/RootHideLoaderLinks.c Shared/VPhoneX1Spawn.c Shared/VPhoneMachPortsCompat.c LaunchHook/VPhoneMachMessage.c
-SYSTEMHOOK_INCLUDES := $(wildcard SystemHook/*.h SystemHook/*.inc FlutterRemapFix/*.h Shared/*.h)
+SYSTEMHOOK_SOURCES := $(wildcard SystemHook/*.c) $(wildcard FlutterRemapFix/*.c) $(wildcard ExecShim/*.c) Shared/RootHideLoaderLinks.c Shared/VPhoneX1Spawn.c Shared/VPhoneMachPortsCompat.c LaunchHook/VPhoneMachMessage.c
+SYSTEMHOOK_INCLUDES := $(wildcard SystemHook/*.h SystemHook/*.inc FlutterRemapFix/*.h ExecShim/*.h Shared/*.h)
 # libmis is not a framework and has no header; the iPhoneOS SDK does ship
 # libmis.tbd, so the interposed symbols bind two-level like any other import
 # rather than through flat dynamic lookup.
@@ -387,7 +387,7 @@ $(LAUNCHHOOK): $(LAUNCHHOOK_SOURCES) $(LAUNCHHOOK_INCLUDES) LaunchHook Shared $(
 		$(LAUNCHHOOK_GENERATED)/mach_excUser.c $(MACHPORTS_GENERATED)/VPhoneMachPortsUser.c -Wl,-not_for_dyld_shared_cache
 	@codesign --force --sign - $@
 
-$(SYSTEMHOOK): $(SYSTEMHOOK_SOURCES) $(SYSTEMHOOK_INCLUDES) SystemHook Shared $(MACHPORTS_STAMP) | $(STAGE)/systemhook
+$(SYSTEMHOOK): $(SYSTEMHOOK_SOURCES) $(SYSTEMHOOK_INCLUDES) SystemHook Shared ExecShim $(MACHPORTS_STAMP) | $(STAGE)/systemhook
 	$(CLANG) $(GUEST_C_FLAGS) -dynamiclib \
 		-I$(MACHPORTS_GENERATED) -ILaunchHook -include VPhoneMachMessage.h \
 		-install_name /usr/lib/SystemHook-vphone.dylib \
