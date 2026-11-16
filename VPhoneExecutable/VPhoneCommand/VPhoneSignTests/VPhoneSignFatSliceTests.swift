@@ -51,6 +51,35 @@ struct VPhoneSignFatSliceTests {
         #expect(try VPhoneSigner.sign(signed, options: options) == signed)
     }
 
+    @Test(arguments: [VPhoneSignOptions.Style.ldid, .appleAdHoc])
+    func `a watchOS arm64_32 slice is preserved and arm64 is signed`(
+        style: VPhoneSignOptions.Style,
+    ) throws {
+        let arm64 = try Data(contentsOf: VPhoneSignFixtures.url("hello-arm64"))
+        let legacy = Self.arm64_32
+        let input = Self.fat([legacy, arm64])
+        let options = VPhoneSignOptions(identifier: "watch", mergesExisting: true, style: style)
+
+        let signed = try VPhoneSigner.sign(input, options: options)
+        let directory = try VPhoneSignFixtures.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("watch")
+        let preserved = directory.appendingPathComponent("arm64_32")
+        try signed.write(to: file)
+
+        let info = try VPhoneSignFixtures.run(URL(fileURLWithPath: "/usr/bin/lipo"), ["-archs", file.path])
+        #expect(info.status == 0, "\(info.error)")
+        #expect(String(decoding: info.out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "arm64_32 arm64")
+
+        let extractLegacy = try VPhoneSignFixtures.run(
+            URL(fileURLWithPath: "/usr/bin/lipo"),
+            [file.path, "-thin", "arm64_32", "-output", preserved.path],
+        )
+        #expect(extractLegacy.status == 0, "\(extractLegacy.error)")
+        #expect(try Data(contentsOf: preserved) == legacy)
+        #expect(try VPhoneSigner.sign(signed, options: options) == signed)
+    }
+
     @Test
     func `thin and fat files containing only armv7 are refused`() throws {
         for input in [Self.armv7, Self.fat([Self.armv7])] {
@@ -95,6 +124,20 @@ struct VPhoneSignFatSliceTests {
     private static var armv7: Data {
         var image = Data()
         for word: UInt32 in [MH_MAGIC, UInt32(CPU_TYPE_ARM), UInt32(CPU_SUBTYPE_ARM_V7), UInt32(MH_BUNDLE), 1, 16, 0] {
+            withUnsafeBytes(of: word.littleEndian) { image.append(contentsOf: $0) }
+        }
+        for word: UInt32 in [UInt32(LC_CODE_SIGNATURE), 16, 44, 12] {
+            withUnsafeBytes(of: word.littleEndian) { image.append(contentsOf: $0) }
+        }
+        image.append(Data("oldSignature".utf8))
+        return image
+    }
+
+    /// A synthetic arm64_32 (watchOS ILP32) header with an opaque old signature.
+    /// Like `armv7` it is never signed or executed; it only has to survive.
+    private static var arm64_32: Data {
+        var image = Data()
+        for word: UInt32 in [MH_MAGIC, UInt32(CPU_TYPE_ARM64_32), 1, UInt32(MH_BUNDLE), 1, 16, 0] {
             withUnsafeBytes(of: word.littleEndian) { image.append(contentsOf: $0) }
         }
         for word: UInt32 in [UInt32(LC_CODE_SIGNATURE), 16, 44, 12] {

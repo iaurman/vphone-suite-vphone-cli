@@ -481,7 +481,13 @@ struct VPhoneMachOFile {
                 let cpuType: UInt32 = data.bigEndianValue(at: entry)
                 let cpuSubtype: UInt32 = data.bigEndianValue(at: entry + 4)
                 var preservedImage: Data?
-                if cpuType == UInt32(CPU_TYPE_ARM) {
+                // armv7 and arm64_32 are the two 32-bit ARM ABIs a third-party IPA can
+                // carry. Neither can be signed here, and neither can run on an iPhone
+                // guest, but both are ordinary in a watchOS companion app
+                // (arm64_32 is watchOS's ILP32 ABI, and its header is a 32-bit
+                // MH_MAGIC just like armv7's). Preserve such a slice byte for byte,
+                // including its old signature, instead of failing the whole install.
+                if cpuType == UInt32(CPU_TYPE_ARM) || cpuType == UInt32(CPU_TYPE_ARM64_32) {
                     let headerSize = MemoryLayout<mach_header>.size
                     guard length >= headerSize,
                           data.littleEndianValue(at: offset) as UInt32 == MH_MAGIC,
