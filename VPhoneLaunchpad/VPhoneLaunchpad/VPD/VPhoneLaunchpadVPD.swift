@@ -504,16 +504,57 @@ extension VPhoneLaunchpadMachineLibrary {
 
 // MARK: - Runtime
 
+/// Per-host overrides for the parts of the port layout that are otherwise
+/// fixed: vpd's HTTP port and the 7xxx band the VM blocks are handed out from.
+///
+/// Several Macs can sit behind one public address, each owning a different
+/// band (host A 7000–7099, host B 7100–7199), and a host whose :6780 is taken
+/// needs vpd somewhere else. Read once from
+/// `~/Library/Application Support/vpd/runtime.json`:
+///
+///     {"httpPort": 7199, "vmPortRange": [7100, 7190]}
+///
+/// The file is optional. Without it, or with a value that cannot work, the
+/// defaults below apply and the app behaves exactly as it did before.
+struct VPhoneLaunchpadVPDRuntime {
+    var httpPort: UInt16 = VPDDefaults.httpPort
+    var portRange: ClosedRange<Int> = VPDPortMapping.defaultRange
+
+    static let path = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/vpd/runtime.json")
+
+    static func load() -> VPhoneLaunchpadVPDRuntime {
+        var runtime = VPhoneLaunchpadVPDRuntime()
+        guard let data = try? Data(contentsOf: path),
+              let root = try? JSONSerialization.jsonObject(with: data),
+              let object = root as? [String: Any]
+        else { return runtime }
+
+        if let port = object["httpPort"] as? Int, (1...65535).contains(port) {
+            runtime.httpPort = UInt16(port)
+        } else if object["httpPort"] != nil {
+            print("[vpd] runtime.json: httpPort must be 1...65535; using \(runtime.httpPort)")
+        }
+
+        if let pair = object["vmPortRange"] as? [Int], pair.count == 2,
+           pair[0] >= 1, pair[1] <= 65535,
+           pair[1] - pair[0] + 1 >= VPDPortMapping.blockSize {
+            runtime.portRange = pair[0]...pair[1]
+        } else if object["vmPortRange"] != nil {
+            print("[vpd] runtime.json: vmPortRange must be [lower, upper] holding a "
+                + "\(VPDPortMapping.blockSize)-port block; using \(runtime.portRange)")
+        }
+        return runtime
+    }
+}
+
 /// vpd, as one object the app model owns: the per-user LaunchAgent, the port
 /// reservation store that every library root shares, the unix control socket
-/// and the `0.0.0.0:6780` REST API and web UI.
+/// and the REST API and web UI on `VPhoneLaunchpadVPDRuntime.httpPort`.
 ///
 /// Nothing here needs root and nothing shells out to `vphone-launchpad-cli`.
 @MainActor
 final class VPhoneLaunchpadVPD {
-    /// vpd's REST API and web UI.
-    static let httpPort: UInt16 = 6780
-
     let store: VPDPortMappingStore
     let model: VPDLaunchpadModel
     let service: VPDService
@@ -531,22 +572,27 @@ final class VPhoneLaunchpadVPD {
         roots: [URL]
     ) {
         self.library = library
+        let runtime = VPhoneLaunchpadVPDRuntime.load()
         // One store for the whole app: vpd and the model see the same files.
-        let store = VPDPortMappingStore(machinesRoots: roots)
+        let store = VPDPortMappingStore(machinesRoots: roots, range: runtime.portRange)
         self.store = store
         model = VPDLaunchpadModel(library: library, leases: leases, store: store)
 
         var configuration = VPDService.Configuration(machinesRoots: roots)
         // The listener is on every interface; the defaults are unchanged and
         // the JSON + same-origin guard in `VPDHTTPRequestPolicy` stays on.
-        configuration.http.port = Self.httpPort
+        configuration.http.port = runtime.httpPort
+        // The allocation band follows the store so both sides agree on which
+        // blocks exist (see `VPhoneLaunchpadVPDRuntime`).
+        configuration.mappingRange = runtime.portRange
         // A stopped VM keeps its own WebRTC base port alive with a small start
         // page; the port is handed to vpweb on start and returned on stop.
         configuration.enableVMPortals = true
         configuration.portalReconcileInterval = .seconds(3)
-        // A previous instance may still be releasing 6780 when the LaunchAgent
-        // restarts the app. vpd retries the bind itself; this is the one place
-        // that decides how long, and the app does not need a second loop.
+        // A previous instance may still be releasing the HTTP port when the
+        // LaunchAgent restarts the app. vpd retries the bind itself; this is
+        // the one place that decides how long, and the app does not need a
+        // second loop.
         configuration.retryPolicy = VPDService.RetryPolicy(
             attempts: 3,
             initialDelay: .seconds(1),
