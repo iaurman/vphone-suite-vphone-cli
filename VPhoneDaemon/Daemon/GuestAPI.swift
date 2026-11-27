@@ -153,6 +153,7 @@ enum GuestAPI {
                 "motion_gyroscope",
                 "motion_gyroscope_toggle",
                 "motion_attitude",
+                "harvest",
             ] + pointerCapabilities() + scriptCapabilities() + GuestHomePodDisplay.capabilities
                 + GuestHomePodDebug.capabilities + GuestHomeViewDistance.capabilities,
         ]
@@ -334,12 +335,15 @@ enum GuestAPI {
                     throw GuestAPIError.invalidRequest("edge touch coordinates are normalized 0..1 only")
                 }
                 vp_hid_touch_edge(touchPhaseCode(phase), number(params, "x"), number(params, "y"), Int32(edge))
+                reportInput("input.touch", params)
                 return ["phase": phase.rawValue, "edge": edge]
             }
-            return try touch(
+            let result = try touch(
                 phase, x: number(params, "x"), y: number(params, "y"),
                 normalized: params["normalized"] as? Bool ?? true,
             )
+            reportInput("input.touch", params)
+            return result
         case "input.touch2":
             // Two fingers in one hand event. icli's `input.touch` carries a
             // single digitizer point, so a pinch has to go through vphoned's own
@@ -358,6 +362,7 @@ enum GuestAPI {
                 number(params, "x1"), number(params, "y1"),
                 number(params, "x2"), number(params, "y2"),
             )
+            reportInput("input.touch2", params)
             return ["phase": phase.rawValue, "fingers": 2]
         case "input.pointer":
             let point: GuestPointerScroll.Point
@@ -371,6 +376,7 @@ enum GuestAPI {
                 throw GuestAPIError.invalidRequest(error.message)
             }
             try movePointer(point, sequence: sequence, buttons: buttons)
+            reportInput("input.pointer", params)
             return ["x": point.x, "y": point.y, "buttons": Int(buttons)]
         case "input.scroll":
             let scroll: GuestPointerScroll.Scroll
@@ -380,6 +386,7 @@ enum GuestAPI {
                 throw GuestAPIError.invalidRequest(error.message)
             }
             try scrollPointer(scroll)
+            reportInput("input.scroll", params)
             return ["phase": scroll.phase.rawValue]
         case "input.hid":
             let page = try integer(params, "page")
@@ -395,29 +402,42 @@ enum GuestAPI {
                     guard vp_hid_keyboard_hold(UInt16(page), UInt16(usage), down.boolValue) else {
                         throw GuestAPIError.operationFailed("HID long-press injection is unavailable")
                     }
-                    return ["page": page, "usage": usage, "action": down.boolValue ? "down" : "up", "long_press": true]
+                    let result: [String: Any] = [
+                        "page": page, "usage": usage,
+                        "action": down.boolValue ? "down" : "up", "long_press": true,
+                    ]
+                    reportInput("input.hid", params)
+                    return result
                 }
             }
             if let down = params["down"] as? Bool {
-                return try hidEvent(page: page, usage: usage, down: down)
+                let result = try hidEvent(page: page, usage: usage, down: down)
+                reportInput("input.hid", params)
+                return result
             }
-            return try hidPress(page: page, usage: usage)
+            let result = try hidPress(page: page, usage: usage)
+            reportInput("input.hid", params)
+            return result
         case "location.set":
-            guard CLLocationManager.locationServicesEnabled() else { throw GuestAPIError.locationServicesOff }
-            return try simulateLocation(
-                latitude: number(params, "latitude"),
-                longitude: number(params, "longitude"),
-                altitude: number(params, "altitude", default: 0),
-                horizontalAccuracy: number(params, "horizontal_accuracy", default: 5),
-                verticalAccuracy: number(params, "vertical_accuracy", default: 5),
-                speed: (params["speed"] as? NSNumber)?.doubleValue,
-                course: (params["course"] as? NSNumber)?.doubleValue,
-            )
+            return try withLocation {
+                guard CLLocationManager.locationServicesEnabled() else { throw GuestAPIError.locationServicesOff }
+                return try simulateLocation(
+                    latitude: number(params, "latitude"),
+                    longitude: number(params, "longitude"),
+                    altitude: number(params, "altitude", default: 0),
+                    horizontalAccuracy: number(params, "horizontal_accuracy", default: 5),
+                    verticalAccuracy: number(params, "vertical_accuracy", default: 5),
+                    speed: (params["speed"] as? NSNumber)?.doubleValue,
+                    course: (params["course"] as? NSNumber)?.doubleValue,
+                )
+            }
         case "location.clear":
-            return try clearSimulatedLocation()
+            return try withLocation { try clearSimulatedLocation() }
         case "location.current":
-            guard CLLocationManager.locationServicesEnabled() else { throw GuestAPIError.locationServicesOff }
-            return try currentLocation(timeout: number(params, "timeout", default: 10))
+            return try withLocation {
+                guard CLLocationManager.locationServicesEnabled() else { throw GuestAPIError.locationServicesOff }
+                return try currentLocation(timeout: number(params, "timeout", default: 10))
+            }
         case "developer_mode.status":
             return try developerModeStatus()
         case "developer_mode.enable":
@@ -668,5 +688,31 @@ enum GuestAPI {
         case .move: 1
         case .up: 3
         }
+    }
+
+    // MARK: Location
+
+    /// One CoreLocation call at a time, for the three `location.*` methods.
+    ///
+    /// CoreLocation's simulation client is one process-wide object shared by
+    /// every caller here, and it is not thread-safe. `queue` above runs
+    /// requests concurrently, and two overlapping fixes have taken the daemon
+    /// down twice (2026-11-20): one trapped in `xpc_connection_resume` with
+    /// `_xpc_api_misuse` while another encoded an invocation on the same
+    /// connection, and one threw from CoreLocation's own logging while another
+    /// waited for a synchronous reply. A fix takes up to 11 s when locationd is
+    /// slow, while a host times its request out after 3 s and sends another, so
+    /// overlaps are ordinary rather than exotic.
+    ///
+    /// A fix that arrives while one is running is refused rather than queued:
+    /// a fix is disposable, and waiting would build a backlog nobody reads.
+    private static let locationGate = DispatchSemaphore(value: 1)
+
+    private static func withLocation<T>(_ body: () throws -> T) throws -> T {
+        guard locationGate.wait(timeout: .now()) == .success else {
+            throw GuestAPIError.operationFailed("A location fix is already in flight")
+        }
+        defer { locationGate.signal() }
+        return try body()
     }
 }

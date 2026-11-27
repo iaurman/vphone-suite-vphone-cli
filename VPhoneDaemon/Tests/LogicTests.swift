@@ -43,8 +43,32 @@ enum LogicTests {
         setupAssistantState()
         homeViewDistancePolicy()
         mobileGestaltAnswers()
+        requestWatch()
         print("\(checks) checks, \(failures) failures")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    static func requestWatch() {
+        let watch = GuestRequestWatch.shared
+        expectEqual(watch.inFlight, 0, "a new watch holds nothing")
+        let first = watch.begin("GET /v1/health")
+        let second = watch.begin("POST /v1/input/tap")
+        expect(first != second, "every request gets a token of its own")
+        expectEqual(watch.inFlight, 2, "two requests in flight")
+        watch.end(first)
+        expectEqual(watch.inFlight, 1, "a returned request leaves the watch")
+        watch.end(second)
+        watch.end(second)
+        expectEqual(watch.inFlight, 0, "the watch empties, and ending twice is harmless")
+
+        // A stall is reported once past ten seconds, then once a minute, so a
+        // long one keeps naming the same call without flooding the log.
+        expect(!GuestRequestWatch.isReportDue(elapsed: 9.9, reported: 0), "nothing before ten seconds")
+        expect(GuestRequestWatch.isReportDue(elapsed: 10, reported: 0), "ten seconds is reported")
+        expect(!GuestRequestWatch.isReportDue(elapsed: 69, reported: 1), "not again within the minute")
+        expect(GuestRequestWatch.isReportDue(elapsed: 70, reported: 1), "a minute later is reported")
+        expect(!GuestRequestWatch.isReportDue(elapsed: 129, reported: 2), "the interval repeats")
+        expect(GuestRequestWatch.isReportDue(elapsed: 130, reported: 2), "the interval repeats")
     }
 
     static func mobileGestaltAnswers() {

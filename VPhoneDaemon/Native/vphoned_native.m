@@ -64,10 +64,27 @@ static bool cached_binary_matches_marker(int directory, int image) {
 
 // MARK: - Bootstrap
 
+/// Whether this process already is the cached image.
+///
+/// The paths are not enough to say so on a rootless guest: there the same file
+/// answers to both `/var/root/...` and `/private/var/root/...`, and
+/// `_NSGetExecutablePath` picks whichever spelling the exec was given. A path
+/// compared as text then never matches the cache, the confirmation below is
+/// skipped, and every launch falls back to the installed binary, so the host
+/// reads the old hash and updates it again for good. The inode says the same
+/// thing about a file as the path does, and says it however the path is
+/// spelled.
+static bool is_the_cache_image(const char *current) {
+    if (strcmp(current, cache) == 0) return true;
+    struct stat running, cached;
+    return stat(current, &running) == 0 && stat(cache, &cached) == 0 &&
+           running.st_dev == cached.st_dev && running.st_ino == cached.st_ino;
+}
+
 void vp_native_bootstrap_cached_binary(void) {
     char current[4096];
     uint32_t size = sizeof(current);
-    if (_NSGetExecutablePath(current, &size) != 0 || strcmp(current, cache) == 0) return;
+    if (_NSGetExecutablePath(current, &size) != 0 || is_the_cache_image(current)) return;
 
     // Keep the launchd process small: hash the cache in bounded chunks. The
     // file is opened once without following a link, and the hash covers that
@@ -106,7 +123,9 @@ void vp_native_bootstrap_cached_binary(void) {
 void vp_native_confirm_cached_binary(void) {
     char current[4096];
     uint32_t size = sizeof(current);
-    if (_NSGetExecutablePath(current, &size) != 0 || strcmp(current, cache) != 0) return;
-    if (rename(pending, marker) != 0)
+    if (_NSGetExecutablePath(current, &size) != 0 || !is_the_cache_image(current)) return;
+    // Nothing to confirm is not a failure: this runs on every start, and a
+    // launch that did not go through the cache leaves no pending marker.
+    if (rename(pending, marker) != 0 && errno != ENOENT)
         fprintf(stderr, "vphoned: could not confirm cached binary: %s\n", strerror(errno));
 }

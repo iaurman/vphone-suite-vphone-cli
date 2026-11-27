@@ -28,6 +28,7 @@ extension GuestAPI {
             executeHomePodDebug,
             executeHomeViewDistance,
             executeScript,
+            executeHarvest,
         ]
         for area in areas {
             if let result = try area(method, params) {

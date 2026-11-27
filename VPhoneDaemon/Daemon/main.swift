@@ -47,6 +47,12 @@ GuestStaticNames.shared.restoreOnStartup()
 // locationd can deadlock as it starts; this restarts it.
 GuestLocationdWatchdog.shared.startOnStartup()
 GuestDeveloperModeSnapshot.shared.startOnStartup()
+// A harvest session whose daemon died has no stoppedAt; this closes it
+// without holding the server's bind.
+GuestHarvestRecorder.guest.recoverOnStartup()
+// A request that never returns takes the API with it; this names it in the log
+// instead of leaving a silence.
+GuestRequestWatch.shared.startMonitoring()
 
 let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 let filePool = NIOThreadPool(numberOfThreads: 2)
@@ -127,7 +133,26 @@ do {
         .wait()
     vp_native_confirm_cached_binary()
     NSLog("vphoned: HTTP/WebSocket API listening on vsock 1339")
-    server.closeFuture.whenComplete { _ in
+    // The proxy restarts a worker that stops beating, and the beat runs on the
+    // loop that accepts connections: a worker whose accept path is stuck stops
+    // beating, which is the only way the proxy can tell a serving worker from
+    // one that is alive and mute. Handler work runs on GuestAPI.queue, so a
+    // wedged handler does not stop the beats; GuestRequestWatch names that case
+    // instead. See vphoned_proxy.c.
+    _ = server.eventLoop.scheduleRepeatedTask(
+        initialDelay: .seconds(0),
+        delay: .seconds(Int64(vp_native_heartbeat_interval())),
+    ) { _ in
+        _ = vp_native_heartbeat_beat()
+    }
+    server.closeFuture.whenComplete { result in
+        // Nothing closes this server today, so a close here is the reason a
+        // vphoned stopped serving. name it.
+        if case let .failure(error) = result {
+            NSLog("vphoned: the API channel closed: %@", String(describing: error))
+        } else {
+            NSLog("vphoned: the API channel closed; ending")
+        }
         DispatchQueue.main.async {
             try? group.syncShutdownGracefully()
             try? filePool.syncShutdownGracefully()

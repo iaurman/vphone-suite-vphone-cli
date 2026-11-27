@@ -143,7 +143,7 @@ final class GuestHyperTextHandler: ChannelInboundHandler, RemovableChannelHandle
                 }
                 request = APIRequest(method: method, params: params, id: nil)
             }
-            let job = HTTPJob(channel: channel, request: request, hub: hub)
+            let job = HTTPJob(channel: channel, request: request, path: path, hub: hub)
             GuestAPI.queue.async { job.run() }
         } catch {
             Self.send(APIWire.error(String(describing: error)), on: channel)
@@ -250,6 +250,14 @@ final class GuestHyperTextHandler: ChannelInboundHandler, RemovableChannelHandle
         case (.GET, "/v1/low-power-mode"), (.PUT, "/v1/low-power-mode"): "power.low_power_mode"
         case (.GET, "/v1/timezone"), (.PUT, "/v1/timezone"): "time.timezone"
         case (.GET, "/v1/clock"), (.PUT, "/v1/clock"): "time.clock"
+        case (.GET, "/v1/harvest/status"): "harvest.status"
+        case (.GET, "/v1/harvest/sessions"): "harvest.sessions"
+        case (.POST, "/v1/harvest/start"): "harvest.start"
+        case (.POST, "/v1/harvest/stop"): "harvest.stop"
+        case (.POST, "/v1/harvest/note"): "harvest.note"
+        case (.POST, "/v1/harvest/archive"): "harvest.archive"
+        case (.DELETE, "/v1/harvest/archive"): "harvest.archive.delete"
+        case (.DELETE, "/v1/harvest"): "harvest.delete"
         case (.GET, "/v1/clipboard"), (.PUT, "/v1/clipboard"): verb == .GET ? "clipboard.get" : "clipboard.set"
         case (.DELETE, "/v1/clipboard"): "clipboard.clear"
         case (.GET, "/v1/files"): "files.list"
@@ -305,15 +313,22 @@ final class GuestHyperTextHandler: ChannelInboundHandler, RemovableChannelHandle
 private final class HTTPJob: @unchecked Sendable {
     let channel: Channel
     let request: APIRequest
+    let path: String
     let hub: APIEventHub
 
-    init(channel: Channel, request: APIRequest, hub: APIEventHub) {
+    init(channel: Channel, request: APIRequest, path: String, hub: APIEventHub) {
         self.channel = channel
         self.request = request
+        self.path = path
         self.hub = hub
     }
 
     func run() {
+        // The work happens here, on the concurrent queue, so this is where a
+        // request can stay in flight: the watch reports one that never returns,
+        // which a log line emitted around the enqueue could never see.
+        let watch = GuestRequestWatch.shared.begin("\(request.method) \(path)")
+        defer { GuestRequestWatch.shared.end(watch) }
         let reply = APIWire.execute(request)
         if reply.status == 200 {
             hub.broadcast(name: "operation.completed", data: ["method": request.method])

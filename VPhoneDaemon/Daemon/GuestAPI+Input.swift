@@ -5,8 +5,29 @@ import IcliKit
 // MARK: - Buttons, Text, Gestures
 
 extension GuestAPI {
-    /// Gesture coordinates are screen points, as `device.screen` reports them.
+    /// Runs the input and hands it to the harvest recorder: a host that records
+    /// a session wants the full sequence, and the screen after the gesture that
+    /// ended it. The recorder decides which inputs end a gesture; keys and text
+    /// are logged and only restart its silence window.
     static func executeInput(_ method: String, _ params: [String: Any]) throws -> [String: Any]? {
+        guard let result = try performInput(method, params) else { return nil }
+        reportInput(method, params)
+        return result
+    }
+
+    /// The one recorder call every input entry point uses. `GuestAPI.execute`
+    /// serves the digitizer paths itself, so those cases call this too; no path
+    /// logs twice because each method has exactly one handler. The
+    /// `{"t":"tap"}`/`{"t":"swipe"}` socket shorthands are translated to these
+    /// method names before they reach vphoned, so the log names the method that
+    /// ran. With no harvest running the call is a gate check and returns
+    /// without touching a queue.
+    static func reportInput(_ method: String, _ params: [String: Any]) {
+        GuestHarvestRecorder.guest.noteInput(method, params)
+    }
+
+    /// Gesture coordinates are screen points, as `device.screen` reports them.
+    private static func performInput(_ method: String, _ params: [String: Any]) throws -> [String: Any]? {
         switch method {
         case "input.button":
             return try pressButton(string(params, "name"))

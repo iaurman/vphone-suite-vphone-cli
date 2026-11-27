@@ -41,10 +41,26 @@ int vp_execv(const char * _Nonnull path, char * _Nullable const argv[_Nonnull]) 
 char * _Null_unspecified vp_sign_app_for_install(const char * _Null_unspecified appPath, const char * _Null_unspecified certificatePath);
 void vp_native_bootstrap_cached_binary(void);
 void vp_native_confirm_cached_binary(void);
-/// 0 = launchd proxy, 1 = --io worker, 2 = --session, -1 = invalid arguments.
+/// 0 = launchd proxy, 1 = --io worker, 2 = --session, 3 = --location-simulate,
+/// -1 = invalid arguments.
 int vp_native_process_mode(void);
 int vp_native_run_proxy(void);
 int vp_native_watch_proxy(void);
+
+// MARK: - Worker Heartbeat
+
+/// Seconds between a worker's beats, the silence the proxy allows between two
+/// of them, and the longer silence a worker still starting up may take.
+#define VP_HEARTBEAT_INTERVAL_SECONDS 5
+#define VP_HEARTBEAT_TIMEOUT_SECONDS 30
+#define VP_HEARTBEAT_GRACE_SECONDS 120
+
+/// The beat interval, for the timer that sends them.
+int vp_native_heartbeat_interval(void);
+/// Beat once to the proxy supervising this worker. The caller must be the
+/// thread that serves the API: a handler that never returns has to stop the
+/// beats, since the proxy cannot see anything else.
+int vp_native_heartbeat_beat(void);
 
 // MARK: - Scripting Sessions
 
