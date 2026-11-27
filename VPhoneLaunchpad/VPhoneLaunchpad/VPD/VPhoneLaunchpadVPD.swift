@@ -312,6 +312,52 @@ final class VPDLaunchpadModel: VPDModel {
         return try await requireVM(named: created.name)
     }
 
+    /// Deletes `name` and clones `source` onto it.
+    ///
+    /// The machine keeps its name and its port block: the block is read before
+    /// the delete and put back after the clone, which is the whole point of the
+    /// operation — a caller that already has the VM open on those four ports
+    /// keeps opening it there. The clone's own block, allocated by `cloneVM`,
+    /// is released by writing over it.
+    ///
+    /// If another machine took the block while the clone ran (a start or a
+    /// clone that allocated in that window), the replacement keeps the block
+    /// the clone was given instead: the alternative is a machine with no ports.
+    func replaceVM(
+        named name: String,
+        with source: String,
+        newIdentity: Bool
+    ) async throws -> VPDVM {
+        guard source != name else {
+            throw VPDModelError.invalidName(name: source)
+        }
+        guard !name.hasPrefix(VPDVM.templateNamePrefix) else {
+            throw VPDModelError.templateProtected(name: name)
+        }
+        guard machine(named: name) != nil else {
+            if try template(named: name) != nil {
+                throw VPDModelError.templateNotOperable(name: name, operation: "替换")
+            }
+            throw VPDModelError.notFound(name: name)
+        }
+        let saved = try? store.currentMapping(forVM: name)
+        try await deleteVM(named: name)
+        let created = try await cloneVM(named: source, as: name, newIdentity: newIdentity)
+        if let saved {
+            let mapping = VPDPortMapping(
+                vm: name,
+                basePort: saved.basePort,
+                updatedAt: Date(),
+                location: saved.location
+            )
+            if (try? store.adopt(mapping, forVM: name)) == nil {
+                print("[vpd] replace: \(name) could not keep block \(saved.basePort); "
+                    + "the replacement keeps the block it was cloned with")
+            }
+        }
+        return try await requireVM(named: created.name)
+    }
+
     func renameVM(named name: String, to newName: String) async throws -> VPDVM {
         guard VPDVMName.isValid(newName) else {
             throw VPDModelError.invalidName(name: newName)
