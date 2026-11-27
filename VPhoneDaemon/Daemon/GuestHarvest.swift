@@ -158,6 +158,8 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         var lastError: String?
         var notes: [[String: Any]] = []
         var running = true
+        /// The `seq` of the last event written; the next one is this + 1.
+        var events = 0
     }
 
     // MARK: - Tuning
@@ -174,15 +176,16 @@ final class GuestHarvestRecorder: @unchecked Sendable {
     /// A timer capture due inside this window is taken first and the interaction
     /// capture coalesces into it, instead of two back-to-back captures.
     static let timerCoalesceWindow: TimeInterval = 0.2
-    static let manifestName = "harvest.json"
-    static let indexName = "index.jsonl"
-    static let interactionsName = "interactions.jsonl"
+    /// The one data file: one JSON object per event, one event per line.
+    static let logName = "session.jsonl"
+    /// The session's header, its notes and the format description, in markdown.
     static let readmeName = "README.md"
     static let archiveSuffix = ".tar.gz"
 
-    /// The on-disk format this recorder writes. A folder without it predates
-    /// versioning; readers must treat that as 0.
-    static let formatVersion = 1
+    /// The on-disk format this recorder writes: 2 is the single log, the header
+    /// and notes in README.md, and no manifest. A folder with a harvest.json is
+    /// version 1.
+    static let formatVersion = 2
 
     /// Session names are the guest's local time, as the session happened.
     private static func sessionName(for date: Date) -> String {
@@ -205,13 +208,12 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         )
     }
 
-    /// Every timestamp in a reply and in a manifest is RFC3339 UTC.
+    /// Every timestamp in a reply is RFC3339 UTC, whole seconds; the session log
+    /// carries milliseconds so a burst's rhythm survives the round trip.
     private static func timestamp(_ date: Date) -> String {
         date.formatted(Self.rfc3339)
     }
 
-    /// The two event logs carry milliseconds, so a burst's rhythm survives the
-    /// round trip. The manifest and the replies stay whole seconds.
     private static func preciseTimestamp(_ date: Date) -> String {
         date.formatted(Self.rfc3339Millis)
     }
@@ -258,9 +260,9 @@ final class GuestHarvestRecorder: @unchecked Sendable {
     /// The input sequence that started the burst waiting for a capture, the
     /// capture number reserved for it, the gesture it is named after, the
     /// interaction sequence of that gesture, and when its silence window ends.
-    /// The capture number is reserved as the input arrives so
-    /// `interactions.jsonl` can name the capture it caused before it runs; the
-    /// recorder is serial, so no other capture can take that number first.
+    /// The capture number is reserved as the input arrives so the input's line
+    /// can name the capture it caused before it runs; the recorder is serial, so
+    /// no other capture can take that number first.
     private var burstStartedAt: Date?
     private var burstCaptureSeq: Int?
     private var burstInteractionSeq: Int?
@@ -328,20 +330,22 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         queue.sync { payloadLocked() }
     }
 
-    /// Appends a note to a session's manifest, this one or an old one.
+    /// Appends a note to a session's README, this one or an old one. Notes are
+    /// session facts, not interaction events, so they stay out of the log: the
+    /// host asks for every session's notes on each status poll.
     func note(session name: String, text: String) throws -> [String: Any] {
         try queue.sync {
             try requireSessionName(name)
             let directory = directory(for: name)
-            guard var body = readManifest(name: name) else {
+            guard var header = readHeader(name: name) else {
                 throw GuestHarvestError.missingSession(name)
             }
-            var notes = body["notes"] as? [[String: Any]] ?? []
+            var notes = header["notes"] as? [[String: Any]] ?? []
             notes.append(["at": Self.timestamp(clock.now), "text": text])
-            body["notes"] = notes
-            try writeManifest(body, to: directory)
-            // The running session writes its own manifest from memory after
-            // every capture; without this the next write would drop the note.
+            header["notes"] = notes
+            try writeReadme(header: header, to: directory)
+            // The running session's in-memory copy feeds the next write of the
+            // README, which happens on stop; without this a note would be lost.
             if var current = session, current.name == name {
                 current.notes = notes
                 session = current
@@ -475,13 +479,12 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         // The file exists from the first second, so every session archives the
         // same shape even when nothing is typed or tapped during it.
         manager.createFile(
-            atPath: directory.appendingPathComponent(Self.interactionsName).path,
+            atPath: directory.appendingPathComponent(Self.logName).path,
             contents: nil,
         )
         self.session = session
         setAcceptingInput(true)
-        writeManifest(session)
-        writeReadme(session)
+        try writeReadme(header: Self.header(for: session), to: directory)
         armTick()
         // The frame a replay starts from: the screen before any input of this
         // session, taken at the interval the reference captures use.
@@ -559,7 +562,10 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         guard var current = session, current.running else { return }
         let now = clock.now
         current.interactions += 1
-        let sequence = current.interactions
+        // The event `seq` this input will get. It is assigned when the line is
+        // appended, and the loop is serial, so it is known here: a capture can
+        // name the input that produced it before the capture runs.
+        let sequence = current.events + 1
         let gesture = Self.gestureName(input.method, input.params)
         var capture: Int?
         if let gesture {
@@ -582,7 +588,6 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             }
         }
         let line: [String: Any] = [
-            "seq": sequence,
             "t": Self.milliseconds(now, since: current.startedAt),
             "at": Self.preciseTimestamp(now),
             "method": input.method,
@@ -593,11 +598,9 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             "capture": capture ?? NSNull(),
         ]
         do {
-            current.recordedBytes += try appendLine(
-                line, to: current.directory, named: Self.interactionsName,
-            )
+            try appendEvent("input", line, to: &current)
         } catch {
-            current.lastError = Self.joined([current.lastError, "appending the interaction: \(error)"])
+            current.lastError = Self.joined([current.lastError, "appending the input: \(error)"])
         }
         session = current
         // The log counts against the same cap as the images; typing alone must
@@ -784,14 +787,15 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             error = Self.joined([error, "writing the capture: \(failure)"])
         }
         let line: [String: Any] = [
-            "seq": sequence,
+            "capture": sequence,
             "t": Self.milliseconds(now, since: current.startedAt),
             "at": Self.preciseTimestamp(now),
             "trigger": trigger,
             "gesture": gesture ?? NSNull(),
-            "interaction": interaction ?? NSNull(),
-            // Named rather than derived from `seq`: a reader must not have to
-            // know the naming rule, and the tree is absent when the walk failed.
+            // The event seq of the input this frame belongs to, or null.
+            "input": interaction ?? NSNull(),
+            // Named rather than derived from `capture`: a reader must not have
+            // to know the naming rule, and the tree is absent when the walk failed.
             "jpeg": jpegName ?? NSNull(),
             "tree": treeName ?? NSNull(),
             "jpeg_bytes": capture.jpeg?.count ?? 0,
@@ -807,20 +811,19 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             "error": error ?? NSNull(),
         ]
         do {
-            try appendIndex(line, to: current.directory)
+            try appendEvent("capture", line, to: &current)
         } catch let failure {
-            error = Self.joined([error, "appending the index: \(failure)"])
+            error = Self.joined([error, "appending the capture: \(failure)"])
         }
         current.captures += 1
-        // A coalesced timer capture carries an interaction too, and is the
-        // capture that interaction got; count it either way.
+        // A coalesced timer capture carries an input too, and is the capture
+        // that input got; count it either way.
         if trigger == "interaction" || interaction != nil {
             current.interactionCaptures += 1
         }
         current.recordedBytes += written
         current.lastError = error
         session = current
-        writeManifest(current)
         if now.timeIntervalSince(current.startedAt) >= current.config.maxSeconds {
             finish(reason: "time")
         }
@@ -829,16 +832,36 @@ final class GuestHarvestRecorder: @unchecked Sendable {
     private func finish(reason: String) {
         guard var current = session, current.running else { return }
         current.running = false
-        current.stoppedAt = clock.now
+        let stoppedAt = clock.now
+        current.stoppedAt = stoppedAt
         current.stopReason = reason
-        session = current
         setAcceptingInput(false)
         tickArmed = false
         tickDue = nil
         burstScheduled = false
         clearBurst()
         inFlightInteraction = nil
-        writeManifest(current)
+        // The log's last line is the one that says the session ended, so a
+        // stopped session's counters are read without walking the file.
+        let line: [String: Any] = [
+            "t": Self.milliseconds(stoppedAt, since: current.startedAt),
+            "at": Self.preciseTimestamp(stoppedAt),
+            "reason": reason,
+            "captures": current.captures,
+            "interactionCaptures": current.interactionCaptures,
+            "interactions": current.interactions,
+            "bytes": current.recordedBytes,
+            "lastError": current.lastError ?? NSNull(),
+        ]
+        do {
+            try appendEvent("stop", line, to: &current)
+        } catch {
+            NSLog(
+                "vphoned: harvest: could not append the stop of %@: %@",
+                current.name, String(describing: error),
+            )
+        }
+        session = current
     }
 
     // MARK: - Retention
@@ -853,7 +876,7 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             var isDirectory: ObjCBool = false
             guard manager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
                   isDirectory.boolValue,
-                  manager.fileExists(atPath: entry.appendingPathComponent(Self.manifestName).path)
+                  manager.fileExists(atPath: entry.appendingPathComponent(Self.logName).path)
             else { continue }
             sessions.append((entry.lastPathComponent, directorySize(entry)))
         }
@@ -883,6 +906,10 @@ final class GuestHarvestRecorder: @unchecked Sendable {
 
     // MARK: - Startup recovery
 
+    /// Marks the sessions a dead daemon left behind: a log whose last event is
+    /// not `stop` gets one appended, so a stopped session answers "when did it
+    /// end and how much did it record" from its last line alone. A line the
+    /// crash cut short is dropped first.
     private func markInterrupted() {
         let manager = FileManager.default
         let entries = (try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
@@ -890,17 +917,34 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             var isDirectory: ObjCBool = false
             guard manager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
                   isDirectory.boolValue,
-                  var body = readManifest(name: entry.lastPathComponent),
-                  body["stoppedAt"] == nil || body["stoppedAt"] is NSNull
+                  !(session?.running == true && session?.name == entry.lastPathComponent),
+                  readHeader(name: entry.lastPathComponent) != nil
             else { continue }
-            body["stoppedAt"] = Self.timestamp(clock.now)
-            body["stopReason"] = "interrupted"
-            body["running"] = false
+            let log = entry.appendingPathComponent(Self.logName)
+            let last = Self.lastEvent(of: log)
+            if last?["kind"] as? String == "stop" { continue }
+            guard let counts = Self.scanLog(log) else { continue }
+            Self.ensureTrailingNewline(log)
+            let line: [String: Any] = [
+                "seq": counts.events + 1,
+                "kind": "stop",
+                "t": (last?["t"] as? Int) ?? 0,
+                "at": (last?["at"] as? String) ?? Self.preciseTimestamp(clock.now),
+                "reason": "interrupted",
+                "captures": counts.captures,
+                "interactionCaptures": counts.interactionCaptures,
+                "interactions": counts.interactions,
+                "bytes": counts.bytes,
+                "lastError": NSNull(),
+            ]
             do {
-                try writeManifest(body, to: entry)
-                NSLog("vphoned: harvest: %@ was interrupted; marked it stopped", entry.lastPathComponent)
+                _ = try appendLine(line, to: entry, named: Self.logName)
+                NSLog("vphoned: harvest: %@ was interrupted; appended its stop", entry.lastPathComponent)
             } catch {
-                NSLog("vphoned: harvest: could not mark %@ interrupted: %@", entry.lastPathComponent, String(describing: error))
+                NSLog(
+                    "vphoned: harvest: could not mark %@ interrupted: %@",
+                    entry.lastPathComponent, String(describing: error),
+                )
             }
         }
     }
@@ -946,14 +990,40 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             var isDirectory: ObjCBool = false
             guard manager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
                   isDirectory.boolValue,
-                  let body = readManifest(name: entry.lastPathComponent)
+                  let header = readHeader(name: entry.lastPathComponent)
             else { continue }
-            summaries[entry.lastPathComponent] = summary(body)
+            var body: [String: Any] = [
+                "session": header["session"] ?? entry.lastPathComponent,
+                "directory": header["directory"] ?? directory(for: entry.lastPathComponent).path,
+                "startedAt": header["startedAt"] ?? NSNull(),
+                "stoppedAt": NSNull(),
+                "stopReason": NSNull(),
+                "captures": 0,
+                "interactionCaptures": 0,
+                "interactions": 0,
+                "bytes": 0,
+                "label": header["label"] ?? NSNull(),
+                "notes": header["notes"] ?? [],
+                "running": false,
+            ]
+            // A stopped session's counters are its log's last line: listing five
+            // sessions reads five small headers and five tails, not five logs.
+            if let stop = Self.lastEvent(of: entry.appendingPathComponent(Self.logName)),
+               stop["kind"] as? String == "stop"
+            {
+                body["stoppedAt"] = stop["at"] ?? NSNull()
+                body["stopReason"] = stop["reason"] ?? NSNull()
+                body["captures"] = stop["captures"] ?? 0
+                body["interactionCaptures"] = stop["interactionCaptures"] ?? 0
+                body["interactions"] = stop["interactions"] ?? 0
+                body["bytes"] = stop["bytes"] ?? 0
+            }
+            summaries[entry.lastPathComponent] = body
         }
-        // The running session is ahead of its on-disk manifest by whatever was
-        // captured or logged since the last write; read it from memory.
+        // The running session is a line or two ahead of its log; read it from
+        // memory, where the counters live.
         if let session {
-            summaries[session.name] = summary(manifest(session))
+            summaries[session.name] = summary(of: session)
         }
         return summaries.keys.sorted(by: >).compactMap { summaries[$0] }
     }
@@ -976,15 +1046,20 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         ]
     }
 
-    private func manifest(_ session: Session) -> [String: Any] {
-        var body = statusFields(session)
-        body["running"] = session.running
+    /// The session's own facts, copied at start. They become the README's front
+    /// matter, so the folder describes itself without the host's bundle store or
+    /// the guest: see `harvest-format.md`.
+    private static func header(for session: Session) -> [String: Any] {
+        var body = environmentBody(session.environment)
+        body["formatVersion"] = formatVersion
+        body["session"] = session.name
+        body["directory"] = session.directory.path
+        body["startedAt"] = preciseTimestamp(session.startedAt)
+        body["intervalSeconds"] = session.config.intervalSeconds
+        body["maxBytes"] = session.config.maxBytes
+        body["maxSeconds"] = session.config.maxSeconds
+        body["captureProfile"] = captureProfileBody()
         body["notes"] = session.notes
-        // Facts copied at start, so the folder describes itself without the
-        // host's bundle store or the guest: see harvest-format.md.
-        body["formatVersion"] = Self.formatVersion
-        body.merge(Self.environmentBody(session.environment)) { _, new in new }
-        body["captureProfile"] = Self.captureProfileBody()
         return body
     }
 
@@ -1028,20 +1103,20 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         ]
     }
 
-    private func summary(_ body: [String: Any]) -> [String: Any] {
+    private func summary(of session: Session) -> [String: Any] {
         [
-            "session": body["session"] ?? NSNull(),
-            "directory": body["directory"] ?? NSNull(),
-            "startedAt": body["startedAt"] ?? NSNull(),
-            "stoppedAt": body["stoppedAt"] ?? NSNull(),
-            "stopReason": body["stopReason"] ?? NSNull(),
-            "captures": body["captures"] ?? 0,
-            "interactionCaptures": body["interactionCaptures"] ?? 0,
-            "interactions": body["interactions"] ?? 0,
-            "bytes": body["recordedBytes"] ?? 0,
-            "label": body["label"] ?? NSNull(),
-            "notes": body["notes"] ?? [],
-            "running": body["running"] ?? false,
+            "session": session.name,
+            "directory": session.directory.path,
+            "startedAt": Self.timestamp(session.startedAt),
+            "stoppedAt": session.stoppedAt.map { Self.timestamp($0) } ?? NSNull(),
+            "stopReason": session.stopReason ?? NSNull(),
+            "captures": session.captures,
+            "interactionCaptures": session.interactionCaptures,
+            "interactions": session.interactions,
+            "bytes": session.recordedBytes,
+            "label": session.environment.label ?? NSNull(),
+            "notes": session.notes,
+            "running": session.running,
         ]
     }
 
@@ -1068,129 +1143,131 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         return parts.allSatisfy { part in part.allSatisfy { $0.isASCII && $0.isNumber } }
     }
 
-    private func readManifest(name: String) -> [String: Any]? {
-        let path = directory(for: name).appendingPathComponent(Self.manifestName)
-        guard let data = FileManager.default.contents(atPath: path.path),
-              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    /// The README's front matter: three lines, the middle one a JSON object.
+    /// Absent, or written for another version, the folder is not this recorder's.
+    private func readHeader(name: String) -> [String: Any]? {
+        let url = directory(for: name).appendingPathComponent(Self.readmeName)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n", maxSplits: 3, omittingEmptySubsequences: false)
+        guard lines.count >= 3, lines[0] == "---", lines[2] == "---",
+              let data = lines[1].data(using: .utf8),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (body["formatVersion"] as? Int) == Self.formatVersion
         else { return nil }
         return body
     }
 
-    private func writeManifest(_ session: Session) {
-        do {
-            try writeManifest(manifest(session), to: session.directory)
-        } catch {
-            NSLog("vphoned: harvest: could not write the manifest of %@: %@", session.name, String(describing: error))
-        }
+    /// The header and the notes, then the format description: a fixed template
+    /// plus those values, so it can never claim more than the recorder observed.
+    private func writeReadme(header: [String: Any], to directory: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        let json = String(decoding: data, as: UTF8.self)
+        let text = "---\n\(json)\n---\n" + Self.readmeBody(header: header)
+        try text.write(
+            to: directory.appendingPathComponent(Self.readmeName),
+            atomically: true, encoding: .utf8,
+        )
     }
 
-    /// A README that travels with the folder: the format version, the
-    /// environment copied at start, what each file is, what each field means and
-    /// how to replay. A fixed template plus those values — it can never claim
-    /// more than the recorder observed.
-    private func writeReadme(_ session: Session) {
-        do {
-            let url = session.directory.appendingPathComponent(Self.readmeName)
-            try Self.readme(for: session).write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            NSLog("vphoned: harvest: could not write the README of %@: %@", session.name, String(describing: error))
+    private static func readmeBody(header: [String: Any]) -> String {
+        func string(_ key: String, _ missing: String = "(unknown)") -> String {
+            guard let value = header[key] as? String, !value.isEmpty else { return missing }
+            return value
         }
-    }
-
-    private static func readme(for session: Session) -> String {
-        let environment = session.environment
-        func text(_ value: String?, missing: String = "(unknown)") -> String {
-            value.flatMap { $0.isEmpty ? nil : $0 } ?? missing
+        func number(_ value: Any?) -> String {
+            (value as? NSNumber)?.stringValue ?? "(unknown)"
         }
-        func number<T>(_ value: T?) -> String {
-            value.map { "\($0)" } ?? "(unknown)"
-        }
-        let model = environment.model.map { " (\($0))" } ?? ""
-        let label = environment.label.flatMap { $0.isEmpty ? nil : $0 } ?? "(none)"
-        let screen = "\(number(environment.screenWidth))x\(number(environment.screenHeight)) points"
-            + " at scale \(number(environment.screenScale))"
+        let screen = header["screen"] as? [String: Any] ?? [:]
+        let model = (header["model"] as? String).map { " (\($0))" } ?? ""
+        let label = (header["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "(none)"
         return """
-        # vphone harvest session \(session.name)
+        # vphone harvest session \(string("session"))
 
-        Written by vphoned when the session started. It describes this folder and
-        the format; it does not summarise what happened.
+        Written by vphoned when the session started, and updated only when a note
+        is added. It describes the folder and the format; it does not summarise
+        what happened. The session's own facts are the JSON front matter above, so
+        a machine does not have to read this prose.
 
         - format: vphone-harvest/\(formatVersion)
-        - guest: \(text(environment.vm))\(model), iOS \(text(environment.iosVersion))
-        - kernel: \(text(environment.kernel)), vphoned \(text(environment.vphonedHash))
-        - screen: \(screen)
-        - started: \(timestamp(session.startedAt)) (UTC; the session name is guest-local time)
-        - time zone: \(text(environment.timeZone))
+        - guest: \(string("vm"))\(model), iOS \(string("iosVersion"))
+        - kernel: \(string("kernel")), vphoned \(string("vphonedHash"))
+        - screen: \(number(screen["width"]))x\(number(screen["height"])) points
+          at scale \(number(screen["scale"]))
+        - started: \(string("startedAt")) (UTC; the session name is guest-local time)
+        - time zone: \(string("timeZone"))
         - label: \(label)
-        - interval: \(session.config.intervalSeconds) s, caps \(session.config.maxBytes) bytes
-          and \(session.config.maxSeconds) s
+        - interval: \(number(header["intervalSeconds"])) s, caps
+          \(number(header["maxBytes"])) bytes and \(number(header["maxSeconds"])) s
 
-        `at` is RFC 3339 UTC, `t` is milliseconds from `startedAt`. The event
-        logs carry milliseconds; the manifest and the replies whole seconds.
+        `at` is RFC 3339 UTC with milliseconds, `t` is milliseconds from
+        `startedAt`. The replies carry whole seconds.
 
         ## Files
 
-        - `harvest.json` — this session's counters and the facts above; rewritten
-          after every capture.
-        - `index.jsonl` — one JSON object per capture, in `seq` order.
-        - `interactions.jsonl` — one JSON object per served input, in `seq`
-          order. Every input is logged, gestures or not, so this file is the
-          replay.
+        - `session.jsonl` — one JSON object per event, one event per line, in
+          `seq` order. Every input is logged, gestures or not, so this file is
+          the replay.
         - `NNNNNN-HHMMSS-trigger.jpg` — screenshot in pixels.
         - `NNNNNN-HHMMSS-trigger.tree.json` — accessibility tree of the same
           moment. `frame` values are points; multiply by `coordinate_scale` to
           compare them with the JPEG. Absent when the walk could not verify a
           foreground app.
 
-        ## index.jsonl
+        ## session.jsonl
 
-        - `seq` — capture number, 1-based; the file names start with it.
-        - `t`, `at` — when the capture was written.
-        - `trigger` — `start` (the opening frame), `timer` (every interval) or
-          `interaction` (after 600 ms of input silence, 2 s cap, 800 ms apart).
-        - `gesture` — the gesture that ended the burst, or null.
-        - `interaction` — the interaction `seq` this frame belongs to, or null.
-          On a `timer` line it means the timer took the frame the burst was
-          waiting for; `trigger` stays `timer` because that is what ran.
-        - `jpeg`, `tree` — file names in this folder, or null.
-        - `jpeg_bytes`, `tree_bytes`, `bytes` — sizes; `bytes` is the sum.
-        - `width`, `height`, `coordinate_scale` — JPEG pixels and pixels per point.
-        - `foreground` — `{bundle_id, pid, verified}` of the app at that moment,
-          or null when the guest could not name one.
-        - `ms` — how long the capture took.
-        - `error` — what failed, or null. A frame can be missing either half.
+        Every line has `seq` (the append order) and `kind`.
 
-        ## interactions.jsonl
+        - `kind: "input"` — one served input: `t`, `at`, `method` (the vphoned
+          RPC, e.g. `input.touch`), `params` (that call's parameters, verbatim)
+          and `capture`, the frame its burst produced. `capture` is `null` when
+          no frame can be claimed: an input served while a capture was already in
+          flight names no frame, and the next frame shows its result.
+        - `kind: "capture"` — one frame: `capture` (1-based frame number, also the
+          file name prefix), `t`, `at`, `trigger` (`start`, `timer`,
+          `interaction`), `gesture` (the gesture that ended the burst, or null),
+          `input` (the `seq` of the input it belongs to, or null), `jpeg`, `tree`
+          (file names, or null), `jpeg_bytes`, `tree_bytes`, `bytes` (their sum),
+          `width`, `height` (JPEG pixels), `coordinate_scale` (pixels per point),
+          `foreground` (`{bundle_id, pid, verified}`, or null), `ms` (how long the
+          capture took) and `error` (what failed, or null).
+        - `kind: "stop"` — the last line of a stopped session: `reason`
+          (`stopped`, `size`, `time`, `error`, `interrupted`), the final
+          `captures`, `interactionCaptures`, `interactions` and `bytes`, and
+          `lastError`.
 
-        - `seq` — 1-based input number, the replay order.
-        - `t`, `at` — when the input was served.
-        - `method` — the vphoned RPC, e.g. `input.touch`.
-        - `params` — that call's parameters, verbatim.
-        - `capture` — the capture its burst produced, or null. Every input of one
-          drag or tap names the same frame; it is not a one-to-one pairing. An
-          input served while a capture was already in flight names no frame: the
-          next frame shows its result, but the link is not claimed after the fact.
+        A timer capture due within 200 ms of a burst takes the frame instead; it
+        stays `trigger: "timer"` and carries the `input` the burst was waiting
+        for. `interactionCaptures` counts those frames too.
 
         ## Replaying
 
         1. Start the guest on the same screen as the first frame
            (`000001-...-start.jpg` when the session has one).
-        2. Send every line in `seq` order: `vphone-launchpad-cli guest rpc <vm>
-           <method> '<params>'`.
+        2. Send every `kind: "input"` line in `seq` order:
+           `vphone-launchpad-cli guest rpc <vm> <method> '<params>'`.
         3. An x/y with `normalized: true` is a fraction of the screen; otherwise
            it is points. Divide the JPEG's pixels by `coordinate_scale` for points.
         4. Compare the JPEG of each `capture` with what the same input produces.
         """
     }
 
-    private func writeManifest(_ body: [String: Any], to directory: URL) throws {
-        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .prettyPrinted])
-        try data.write(to: directory.appendingPathComponent(Self.manifestName), options: .atomic)
+    /// Appends one event to the session log, assigning its `seq` and counting
+    /// the line's bytes. The caller adds the image bytes, if any.
+    @discardableResult
+    private func appendEvent(
+        _ kind: String, _ fields: [String: Any], to session: inout Session,
+    ) throws -> Int {
+        var line = fields
+        line["seq"] = session.events + 1
+        line["kind"] = kind
+        let written = try appendLine(line, to: session.directory, named: Self.logName)
+        session.events += 1
+        session.recordedBytes += written
+        return written
     }
 
     /// Appends one JSON line and closes the handle, so a crash keeps every line
-    /// already written. Returns the bytes it added, which `recordedBytes`
-    /// counts for the interaction log.
+    /// already written. Returns the bytes it added.
     private func appendLine(
         _ line: [String: Any], to directory: URL, named name: String,
     ) throws -> Int {
@@ -1207,8 +1284,118 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         return data.count
     }
 
-    private func appendIndex(_ line: [String: Any], to directory: URL) throws {
-        _ = try appendLine(line, to: directory, named: Self.indexName)
+    /// The last complete line of a log, read from the end so a stopped session's
+    /// counters never need a full scan. A partial line left by a crash is not a
+    /// line: the seek stops at the newline before it.
+    private static func lastEvent(of url: URL) -> [String: Any]? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let end = try? handle.seekToEnd(), end > 0 else { return nil }
+        var position = end
+        var buffer = Data()
+        let chunk: UInt64 = 8_192
+        while position > 0 {
+            let start = position > chunk ? position - chunk : 0
+            try? handle.seek(toOffset: start)
+            guard let data = try? handle.read(upToCount: Int(position - start)) else { return nil }
+            buffer = data + buffer
+            if let newline = trimmed(buffer).lastIndex(of: 0x0A) {
+                return event(from: buffer[buffer.index(after: newline)...])
+            }
+            position = start
+        }
+        return event(from: buffer)
+    }
+
+    /// Drops a crash's half-written last line, so the next append starts a line
+    /// of its own.
+    private static func ensureTrailingNewline(_ url: URL) {
+        guard let handle = try? FileHandle(forUpdating: url) else { return }
+        defer { try? handle.close() }
+        guard let end = try? handle.seekToEnd(), end > 0 else { return }
+        try? handle.seek(toOffset: end - 1)
+        if let last = try? handle.read(upToCount: 1), last == Data([0x0A]) { return }
+        var position = end
+        let chunk: UInt64 = 8_192
+        while position > 0 {
+            let start = position > chunk ? position - chunk : 0
+            try? handle.seek(toOffset: start)
+            guard let data = try? handle.read(upToCount: Int(position - start)) else { return }
+            if let newline = data.lastIndex(of: 0x0A) {
+                let offset = start + UInt64(data.distance(from: data.startIndex, to: newline)) + 1
+                try? handle.truncate(atOffset: offset)
+                return
+            }
+            position = start
+        }
+        try? handle.truncate(atOffset: 0)
+    }
+
+    private static func trimmed(_ data: Data) -> Data {
+        var end = data.endIndex
+        while end > data.startIndex, data[data.index(before: end)] == 0x0A
+            || data[data.index(before: end)] == 0x0D
+        {
+            end = data.index(before: end)
+        }
+        return data[data.startIndex..<end]
+    }
+
+    private static func event(from line: Data) -> [String: Any]? {
+        let line = trimmed(line)
+        guard !line.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    /// Counts a log whose stop line is missing, the way the recorder would have
+    /// counted it while running. Chunked, so a capped session is never loaded
+    /// whole.
+    private static func scanLog(
+        _ url: URL,
+    ) -> (events: Int, captures: Int, interactionCaptures: Int, interactions: Int, bytes: Int)? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var events = 0
+        var captures = 0
+        var interactionCaptures = 0
+        var interactions = 0
+        var bytes = 0
+        var buffer = Data()
+        func consume(_ line: Data) {
+            let line = trimmed(line)
+            guard !line.isEmpty,
+                  let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let kind = object["kind"] as? String
+            else { return }
+            events += 1
+            bytes += line.count + 1
+            switch kind {
+            case "capture":
+                captures += 1
+                let linked = !(object["input"] is NSNull) && object["input"] != nil
+                if object["trigger"] as? String == "interaction" || linked {
+                    interactionCaptures += 1
+                }
+                bytes += (object["jpeg_bytes"] as? Int ?? 0) + (object["tree_bytes"] as? Int ?? 0)
+            case "input":
+                interactions += 1
+            default:
+                break
+            }
+        }
+        while true {
+            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else {
+                break
+            }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                consume(buffer[..<newline])
+                buffer = buffer[buffer.index(after: newline)...]
+            }
+        }
+        return (events, captures, interactionCaptures, interactions, bytes)
     }
 
     private func fileSize(_ url: URL) -> Int? {

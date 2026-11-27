@@ -243,60 +243,77 @@ enum HarvestTests {
         }
 
         func logBytes(_ name: String) -> Int {
-            let path = directory(name).appendingPathComponent("interactions.jsonl").path
+            let path = directory(name).appendingPathComponent("session.jsonl").path
             guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
                   let size = attributes[.size] as? NSNumber
             else { return 0 }
             return size.intValue
         }
 
-        func manifest(_ name: String) -> [String: Any] {
-            let path = directory(name).appendingPathComponent("harvest.json")
-            guard let data = FileManager.default.contents(atPath: path.path),
+        /// The README's JSON front matter: the session's own facts.
+        func header(_ name: String) -> [String: Any] {
+            let path = directory(name).appendingPathComponent("README.md")
+            guard let text = try? String(contentsOf: path, encoding: .utf8) else { return [:] }
+            let lines = text.split(separator: "\n", maxSplits: 3, omittingEmptySubsequences: false)
+            guard lines.count >= 3, lines[0] == "---", lines[2] == "---",
+                  let data = lines[1].data(using: .utf8),
                   let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return [:] }
             return body
         }
 
-        func index(_ name: String) -> [[String: Any]] {
-            let path = directory(name).appendingPathComponent("index.jsonl")
+        func events(_ name: String) -> [[String: Any]] {
+            let path = directory(name).appendingPathComponent("session.jsonl")
             guard let text = try? String(contentsOf: path, encoding: .utf8) else { return [] }
             return text.split(separator: "\n").compactMap { line in
                 (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
             }
         }
 
-        func interactions(_ name: String) -> [[String: Any]] {
-            let path = directory(name).appendingPathComponent("interactions.jsonl")
-            guard let text = try? String(contentsOf: path, encoding: .utf8) else { return [] }
-            return text.split(separator: "\n").compactMap { line in
-                (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
-            }
+        func frames(_ name: String) -> [[String: Any]] {
+            events(name).filter { $0["kind"] as? String == "capture" }
         }
 
-        /// A session a previous daemon left: `stopped` or, when nil, still open.
+        func inputs(_ name: String) -> [[String: Any]] {
+            events(name).filter { $0["kind"] as? String == "input" }
+        }
+
+        /// The stop line, when the session has one.
+        func stop(_ name: String) -> [String: Any]? {
+            events(name).last { $0["kind"] as? String == "stop" }
+        }
+
+        /// A session a previous daemon left: `stopped` names the stop time; nil
+        /// leaves the log without a stop line, the shape a crash leaves behind.
         func writeSession(name: String, bytes: Int, stopped: String?) throws {
             let directory = directory(name)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let manifest: [String: Any] = [
+            let header: [String: Any] = [
+                "formatVersion": 2,
                 "session": name,
                 "directory": directory.path,
+                "startedAt": "2026-01-01T00:00:00Z",
                 "intervalSeconds": 3,
                 "maxBytes": 2 << 30,
                 "maxSeconds": 1800,
-                "startedAt": "2026-01-01T00:00:00Z",
-                "stoppedAt": stopped ?? NSNull(),
-                "captures": 1,
-                "interactionCaptures": 0,
-                "interactions": 0,
-                "recordedBytes": bytes,
-                "stopReason": stopped == nil ? NSNull() : "stopped",
-                "lastError": NSNull(),
                 "notes": [],
-                "running": stopped == nil,
             ]
-            try JSONSerialization.data(withJSONObject: manifest)
-                .write(to: directory.appendingPathComponent("harvest.json"))
+            let headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+            let readme = "---\n" + String(decoding: headerData, as: UTF8.self) + "\n---\n# fixture\n"
+            try readme.write(
+                to: directory.appendingPathComponent("README.md"), atomically: true, encoding: .utf8,
+            )
+            var lines = [
+                #"{"seq":1,"kind":"capture","capture":1,"t":0,"at":"2026-01-01T00:00:00.000Z","trigger":"timer","gesture":null,"input":null,"jpeg":"capture.bin","jpeg_bytes":"# + String(bytes) + #","tree":null,"tree_bytes":0,"bytes":"# + String(bytes) + #","width":1,"height":1,"coordinate_scale":1,"foreground":null,"ms":1,"error":null}"#,
+            ]
+            if let stopped {
+                lines.append(
+                    #"{"seq":2,"kind":"stop","t":600000,"at":""# + stopped + #"","reason":"stopped","captures":1,"interactionCaptures":0,"interactions":0,"bytes":"# + String(bytes) + #","lastError":null}"#,
+                )
+            }
+            try (lines.joined(separator: "\n") + "\n").write(
+                to: directory.appendingPathComponent("session.jsonl"), atomically: true, encoding: .utf8,
+            )
             guard bytes > 0 else { return }
             let capture = directory.appendingPathComponent("capture.bin")
             FileManager.default.createFile(atPath: capture.path, contents: nil)
@@ -361,28 +378,28 @@ enum HarvestTests {
 
         let name = harness.session
         let files = harness.files(name)
-        check(files.contains("harvest.json"), "the manifest is written")
-        check(files.contains("index.jsonl"), "the index is written")
-        check(files.contains("interactions.jsonl"), "the interaction log exists from the start")
+        check(files.contains("README.md"), "the header is written")
+        check(files.contains("session.jsonl"), "the log exists from the start")
         check(files.filter { $0.hasSuffix(".jpg") }.count == 3, "one JPEG per capture")
         check(files.filter { $0.hasSuffix(".tree.json") }.count == 3, "one tree per capture")
         check(files.contains { $0.hasPrefix("000001-") && $0.hasSuffix(".jpg") }, "the sequence pads to six digits")
 
-        let index = harness.index(name)
-        check(index.count == 3, "one index line per capture")
-        check(index.first?["seq"] as? Int == 1, "the sequence starts at one")
-        check(index.first?["trigger"] as? String == "timer", "the trigger is the timer")
-        check(index.first?["gesture"] is NSNull, "a timer capture has no gesture")
-        check(index.first?["bytes"] as? Int == 2_000, "the line counts both halves")
-        check((index.first?["error"] as? String) == nil, "a good capture records no error")
-        check((index.first?["at"] as? String)?.hasSuffix("Z") == true, "the index time is UTC")
+        let frames = harness.frames(name)
+        check(frames.count == 3, "one capture event per frame")
+        check(frames.first?["seq"] as? Int == 1, "the log starts at one")
+        check(frames.first?["capture"] as? Int == 1, "the frame number starts at one")
+        check(frames.first?["trigger"] as? String == "timer", "the trigger is the timer")
+        check(frames.first?["gesture"] is NSNull, "a timer capture has no gesture")
+        check(frames.first?["bytes"] as? Int == 2_000, "the line counts both halves")
+        check((frames.first?["error"] as? String) == nil, "a good capture records no error")
+        check((frames.first?["at"] as? String)?.hasSuffix("Z") == true, "the capture time is UTC")
 
-        let manifest = harness.manifest(name)
-        check(manifest["running"] as? Bool == true, "the manifest follows the running session")
-        check(manifest["captures"] as? Int == 3, "the manifest counts the captures")
-        check(manifest["recordedBytes"] as? Int == 6_000, "the manifest counts the bytes")
-        check(manifest["stopReason"] is NSNull, "the session is still open")
-        check(harness.status["stopReason"] is NSNull, "status agrees")
+        let header = harness.header(name)
+        check(header["formatVersion"] as? Int == 2, "the header is the new format")
+        check(harness.status["captures"] as? Int == 3, "the status counts the captures")
+        check((harness.status["recordedBytes"] as? Int ?? 0) > 6_000, "the log's own lines count too")
+        check(harness.status["stopReason"] is NSNull, "the session is still open")
+        check(harness.events(name).count == 3, "three events, all captures")
     }
 
     static func startFrame() throws {
@@ -394,10 +411,10 @@ enum HarvestTests {
         check(harness.captures() == 1, "the opening frame is capture one")
 
         let name = harness.session
-        let index = harness.index(name)
-        check(index.first?["trigger"] as? String == "start", "named start")
-        check(index.first?["gesture"] is NSNull, "the opening frame has no gesture")
-        check(index.first?["interaction"] is NSNull, "and no interaction")
+        let frames = harness.frames(name)
+        check(frames.first?["trigger"] as? String == "start", "named start")
+        check(frames.first?["gesture"] is NSNull, "the opening frame has no gesture")
+        check(frames.first?["input"] is NSNull, "and no input")
         check(
             harness.files(name).contains { $0.hasPrefix("000001-") && $0.hasSuffix("-start.jpg") },
             "the file name says start too",
@@ -406,7 +423,7 @@ enum HarvestTests {
         // The interval runs from the start, not from the opening frame.
         harness.tick(by: 3)
         check(harness.captures() == 2, "the first tick still follows one interval later")
-        check(harness.index(name).last?["trigger"] as? String == "timer", "as a timer capture")
+        check(harness.frames(name).last?["trigger"] as? String == "timer", "as a timer capture")
     }
 
     static func selfDescribing() throws {
@@ -429,8 +446,8 @@ enum HarvestTests {
         )
 
         let name = harness.session
-        let manifest = harness.manifest(name)
-        check(manifest["formatVersion"] as? Int == 1, "the manifest is versioned")
+        let manifest = harness.header(name)
+        check(manifest["formatVersion"] as? Int == 2, "the header is versioned")
         check(manifest["vm"] as? String == "vm1", "the guest names the VM")
         check(manifest["iosVersion"] as? String == "26.6.0", "and its iOS")
         check(manifest["vphonedHash"] as? String == "abc123", "and the daemon build")
@@ -453,19 +470,19 @@ enum HarvestTests {
             contentsOf: harness.directory(name).appendingPathComponent("README.md"),
             encoding: .utf8,
         )) ?? ""
-        check(readme.contains("vphone-harvest/1"), "the README states the format version")
+        check(readme.contains("vphone-harvest/2"), "the README states the format version")
         check(readme.contains("vm1"), "and the guest")
         check(readme.contains("open Settings, General, About"), "and the label")
-        check(readme.contains("interactions.jsonl"), "and how to replay")
+        check(readme.contains("session.jsonl"), "and how to replay")
 
         harness.input("input.touch", ["phase": "up", "x": 0.5, "y": 0.5, "normalized": true])
         harness.advance(0.7)
         harness.runner.runNext()
         harness.settle()
 
-        let index = harness.index(name)
-        check(index.count == 1, "one frame")
-        let frame = index.first ?? [:]
+        let frames = harness.frames(name)
+        check(frames.count == 1, "one frame")
+        let frame = frames.first ?? [:]
         check(frame["t"] as? Int == 700, "the frame is stamped in ms from the start")
         check((frame["at"] as? String)?.contains(".") == true, "and its time carries milliseconds")
         check(frame["jpeg"] as? String == "000001-\(Self.clockText(harness.clock.current))-interaction.jpg",
@@ -476,7 +493,7 @@ enum HarvestTests {
         check(frame["bytes"] as? Int == 2_000, "and together")
         check(frame["foreground"] is NSNull, "a capture without a foreground says null")
 
-        let log = harness.interactions(name)
+        let log = harness.inputs(name)
         check(log.first?["t"] as? Int == 0, "the input is stamped from the start")
         check((log.first?["at"] as? String)?.contains(".") == true, "with milliseconds")
     }
@@ -515,10 +532,10 @@ enum HarvestTests {
         check(harness.captures() == 1, "the interaction is captured once")
         check(harness.status["interactionCaptures"] as? Int == 1, "and counted as an interaction")
 
-        let index = harness.index(harness.session)
-        check(index.first?["trigger"] as? String == "interaction", "an interaction capture")
-        check(index.first?["gesture"] as? String == "drag", "the gesture is named")
-        check(index.first?["interaction"] as? Int == 2, "the last input of the burst is linked")
+        let frames = harness.frames(harness.session)
+        check(frames.first?["trigger"] as? String == "interaction", "an interaction capture")
+        check(frames.first?["gesture"] as? String == "drag", "the gesture is named")
+        check(frames.first?["input"] as? Int == 2, "the last input of the burst is linked")
 
         harness.input("input.tap", ["x": 10, "y": 20])
         harness.advance(0.5)
@@ -556,7 +573,7 @@ enum HarvestTests {
             harness.input(method, params)
         }
 
-        let log = harness.interactions(harness.session)
+        let log = harness.inputs(harness.session)
         check(log.count == inputs.count, "every input is one line")
         check(log.map { $0["seq"] as? Int ?? 0 } == Array(1 ... inputs.count), "the log keeps the order")
         check(
@@ -582,12 +599,12 @@ enum HarvestTests {
         harness.runner.runNext()
         harness.settle()
 
-        let log = harness.interactions(harness.session)
-        let index = harness.index(harness.session)
+        let log = harness.inputs(harness.session)
+        let frames = harness.frames(harness.session)
         check(log.count == 2, "both touch phases are logged")
-        check(index.first?["seq"] as? Int == 1, "the capture is the first")
-        check(index.first?["interaction"] as? Int == 2, "the index names the up")
-        check(index.first?["gesture"] as? String == "touch", "the gesture is the touch")
+        check(frames.first?["seq"] as? Int == 3, "the capture follows both inputs")
+        check(frames.first?["input"] as? Int == 2, "the frame names the up")
+        check(frames.first?["gesture"] as? String == "touch", "the gesture is the touch")
         if log.count == 2 {
             check(log[0]["capture"] is NSNull, "the down caused no capture")
             check(log[1]["capture"] as? Int == 1, "the up names capture 1")
@@ -602,7 +619,7 @@ enum HarvestTests {
         check(harness.runner.pending.isEmpty, "typing and keys trigger no capture")
         check(harness.captures() == 0, "nothing is captured")
 
-        let log = harness.interactions(harness.session)
+        let log = harness.inputs(harness.session)
         check(log.count == 2, "both are still logged")
         check(log.allSatisfy { $0["capture"] is NSNull }, "neither names a capture")
         check(harness.status["interactions"] as? Int == 2, "the status counts them")
@@ -652,9 +669,9 @@ enum HarvestTests {
         harness.advance(5)
         check(harness.runner.pending.isEmpty, "no second capture follows")
 
-        let log = harness.interactions(harness.session)
+        let log = harness.inputs(harness.session)
         check(log.count == 3, "all three inputs are logged")
-        check(harness.index(harness.session).first?["interaction"] as? Int == 1, "the index links the tap")
+        check(harness.frames(harness.session).first?["input"] as? Int == 1, "the frame links the tap")
         if log.count == 3 {
             check(log[0]["capture"] as? Int == 1, "the tap names the capture")
             check(log[1]["capture"] is NSNull, "the text does not")
@@ -684,15 +701,15 @@ enum HarvestTests {
         check(profile?.maxDepth == 16, "a shallower tree")
         check(profile?.timeoutMS == 1200, "and a shorter walk")
 
-        let index = harness.index(harness.session)
-        check(index.count == 2, "two captures are indexed")
-        if index.count == 2 {
-            check(index[0]["width"] as? Int == 1290, "the timer capture is native width")
-            check(index[0]["height"] as? Int == 2796, "and native height")
-            check(index[0]["coordinate_scale"] as? Double == 3, "with a 3x scale")
-            check(index[1]["width"] as? Int == 1290, "the interaction capture is native width")
-            check(index[1]["height"] as? Int == 2796, "and native height")
-            check(index[1]["coordinate_scale"] as? Double == 3, "with the same 3x scale")
+        let frames = harness.frames(harness.session)
+        check(frames.count == 2, "two captures are in the log")
+        if frames.count == 2 {
+            check(frames[0]["width"] as? Int == 1290, "the timer capture is native width")
+            check(frames[0]["height"] as? Int == 2796, "and native height")
+            check(frames[0]["coordinate_scale"] as? Double == 3, "with a 3x scale")
+            check(frames[1]["width"] as? Int == 1290, "the interaction capture is native width")
+            check(frames[1]["height"] as? Int == 2796, "and native height")
+            check(frames[1]["coordinate_scale"] as? Double == 3, "with the same 3x scale")
         }
     }
 
@@ -711,13 +728,13 @@ enum HarvestTests {
             harness.source.profiles.last == GuestHarvestRecorder.CaptureProfile.timer,
             "the coalesced capture is the timer's full one",
         )
-        let index = harness.index(harness.session)
-        check(index.first?["trigger"] as? String == "timer", "the timer took it")
-        check(index.first?["interaction"] as? Int == 1, "and names the interaction")
-        check(index.first?["gesture"] as? String == "tap", "with the gesture the burst ended on")
+        let frames = harness.frames(harness.session)
+        check(frames.first?["trigger"] as? String == "timer", "the timer took it")
+        check(frames.first?["input"] as? Int == 1, "and names the input")
+        check(frames.first?["gesture"] as? String == "tap", "with the gesture the burst ended on")
         check(
-            harness.interactions(harness.session).first?["capture"] as? Int == 1,
-            "the interaction names the timer capture",
+            harness.inputs(harness.session).first?["capture"] as? Int == 1,
+            "the input names the timer capture",
         )
         harness.advance(0.6)
         check(harness.runner.pending.isEmpty, "the burst left no second capture behind")
@@ -736,8 +753,8 @@ enum HarvestTests {
         early.settle()
         check(early.captures() == 1, "one capture, not two")
         check(
-            early.index(early.session).first?["interaction"] as? Int == 1,
-            "and it names the interaction",
+            early.frames(early.session).first?["input"] as? Int == 1,
+            "and it names the input",
         )
     }
 
@@ -761,7 +778,7 @@ enum HarvestTests {
             harness.status["recordedBytes"] as? Int == logAndCapture + 2_000,
             "the log and the capture are both counted",
         )
-        check(harness.manifest(harness.session)["interactions"] as? Int == 2, "the manifest carries the count")
+        check(harness.status["interactions"] as? Int == 2, "the status carries the count")
     }
 
     static func skipWhileCapturing() throws {
@@ -793,19 +810,19 @@ enum HarvestTests {
         harness.tick(by: 1)
         harness.tick(by: 1)
         check(harness.captures() == 2, "two captures fit")
-        check(harness.status["recordedBytes"] as? Int == 800_000, "their bytes are counted")
+        check((harness.status["recordedBytes"] as? Int ?? 0) >= 800_000, "their bytes are counted")
 
         harness.advance(1)
         check(harness.runner.pending.count == 1, "the third capture is asked for")
         harness.runner.runNext()
         harness.settle()
         check(harness.captures() == 2, "the capture over the cap is not counted")
-        check(harness.status["recordedBytes"] as? Int == 800_000, "and not written")
+        check((harness.status["recordedBytes"] as? Int ?? 0) < 810_000, "and not written")
         check(harness.status["running"] as? Bool == false, "the session stops")
         check(harness.status["stopReason"] as? String == "size", "because of its size")
-        check(harness.index(harness.session).count == 2, "the index has no line for it")
+        check(harness.frames(harness.session).count == 2, "the log has no line for it")
         check(harness.files(harness.session).filter { $0.hasSuffix(".jpg") }.count == 2, "no JPEG either")
-        check(harness.manifest(harness.session)["stopReason"] as? String == "size", "the manifest says why")
+        check(harness.stop(harness.session)?["reason"] as? String == "size", "the stop line says why")
 
         harness.advance(10)
         check(harness.runner.pending.isEmpty, "a stopped session asks for nothing")
@@ -828,7 +845,7 @@ enum HarvestTests {
         check(harness.status["stopReason"] as? String == "time", "because of the hour")
         check(harness.status["elapsedSeconds"] as? Int == 60, "the elapsed time is the cap")
         check((harness.status["stoppedAt"] as? String)?.hasSuffix("Z") == true, "a stop time is recorded")
-        check(harness.manifest(harness.session)["stopReason"] as? String == "time", "the manifest says why")
+        check(harness.stop(harness.session)?["reason"] as? String == "time", "the stop line says why")
     }
 
     static func captureFailure() throws {
@@ -843,9 +860,9 @@ enum HarvestTests {
         check(harness.status["running"] as? Bool == true, "a failed capture keeps the session running")
         check((harness.status["lastError"] as? String)?.contains("not verified") == true, "the error is reported")
 
-        let index = harness.index(harness.session)
-        check((index.first?["error"] as? String)?.contains("not verified") == true, "the index names the error")
-        check(index.first?["bytes"] as? Int == 0, "a failed capture writes no bytes")
+        let frames = harness.frames(harness.session)
+        check((frames.first?["error"] as? String)?.contains("not verified") == true, "the log names the error")
+        check(frames.first?["bytes"] as? Int == 0, "a failed capture writes no bytes")
         check(harness.files(harness.session).filter { $0.hasSuffix(".jpg") }.isEmpty, "and no files")
 
         harness.source.failure = nil
@@ -869,17 +886,17 @@ enum HarvestTests {
 
         harness.runner.runNext()
         harness.settle()
-        let manifest = harness.manifest(name)
-        check(manifest["captures"] as? Int == 1, "the capture still lands")
-        let notes = manifest["notes"] as? [[String: Any]] ?? []
-        check(notes.count == 1, "the capture's manifest write keeps the note")
+        let header = harness.header(name)
+        check(harness.status["captures"] as? Int == 1, "the capture still lands")
+        let notes = header["notes"] as? [[String: Any]] ?? []
+        check(notes.count == 1, "the note is in the README")
         check(notes.first?["text"] as? String == "the screen hung", "the note text is the one sent")
         check((notes.first?["at"] as? String)?.hasSuffix("Z") == true, "the note has a UTC time")
 
         _ = harness.recorder.stop()
         check(FileManager.default.fileExists(atPath: harness.directory(name).path), "stopping keeps the directory")
         _ = try harness.recorder.note(session: name, text: "after the stop")
-        check((harness.manifest(name)["notes"] as? [[String: Any]])?.count == 2, "an old session takes notes")
+        check((harness.header(name)["notes"] as? [[String: Any]])?.count == 2, "an old session takes notes")
 
         check(refuses { _ = try harness.recorder.note(session: "20260101-000000", text: "x") }, "an unknown session is refused")
         check(refuses { _ = try harness.recorder.note(session: "../outside", text: "x") }, "a path is not a session")
@@ -946,19 +963,31 @@ enum HarvestTests {
         try harness.writeSession(name: "20260101-000001", bytes: 4, stopped: "2026-01-01T00:10:00Z")
         try harness.writeSession(name: "20260102-000002", bytes: 4, stopped: nil)
 
+        // The shape a crash leaves: a half-written line after the last event.
+        let crashedLog = harness.directory("20260102-000002")
+            .appendingPathComponent("session.jsonl")
+        if let handle = try? FileHandle(forWritingTo: crashedLog) {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(#"{"seq":2,"kind":"cap"#.utf8))
+            try handle.close()
+        }
+
         harness.recorder.recoverOnStartup()
         harness.settle()
 
-        let recovered = harness.manifest("20260102-000002")
-        check(recovered["stopReason"] as? String == "interrupted", "a session without a stop is interrupted")
-        check((recovered["stoppedAt"] as? String)?.hasSuffix("Z") == true, "it gets a stop time")
-        check(recovered["running"] as? Bool == false, "and is not running")
-        check(recovered["captures"] as? Int == 1, "its counts stay")
+        let recovered = harness.stop("20260102-000002")
+        check(recovered?["reason"] as? String == "interrupted", "a session without a stop is interrupted")
+        check((recovered?["at"] as? String)?.hasSuffix("Z") == true, "it gets a stop time")
+        check(recovered?["captures"] as? Int == 1, "its counts stay")
         check(harness.files("20260102-000002").contains("capture.bin"), "its files stay")
+        let repaired = (try? String(contentsOf: crashedLog, encoding: .utf8)) ?? ""
+        check(!repaired.contains(#""kind":"cap""#), "the half-written line is gone")
+        check(repaired.hasSuffix("\n"), "the repaired log ends on a line")
+        check(repaired.split(separator: "\n").count == 2, "the capture and the appended stop")
 
-        let stopped = harness.manifest("20260101-000001")
-        check(stopped["stopReason"] as? String == "stopped", "a closed session is left alone")
-        check(stopped["stoppedAt"] as? String == "2026-01-01T00:10:00Z", "with its own stop time")
+        let stopped = harness.stop("20260101-000001")
+        check(stopped?["reason"] as? String == "stopped", "a closed session is left alone")
+        check(stopped?["at"] as? String == "2026-01-01T00:10:00Z", "with its own stop time")
         check(harness.sessions.count == 2, "both sessions are listed")
         check(harness.sessions.first?["session"] as? String == "20260102-000002", "newest first")
         check(harness.sessions.first?["stopReason"] as? String == "interrupted", "the interrupted one leads")
@@ -1000,11 +1029,10 @@ enum HarvestTests {
 
         let unpacked = extraction.appendingPathComponent(name)
         let unpackedFiles = ((try? FileManager.default.contentsOfDirectory(atPath: unpacked.path)) ?? []).sorted()
-        check(unpackedFiles.contains("harvest.json"), "the archive holds the manifest")
-        check(unpackedFiles.contains("index.jsonl"), "the archive holds the index")
-        check(unpackedFiles.contains("interactions.jsonl"), "the archive holds the interaction log")
+        check(unpackedFiles.contains("README.md"), "the archive holds the header")
+        check(unpackedFiles.contains("session.jsonl"), "the archive holds the log")
         let unpackedLog = try String(
-            contentsOf: unpacked.appendingPathComponent("interactions.jsonl"), encoding: .utf8,
+            contentsOf: unpacked.appendingPathComponent("session.jsonl"), encoding: .utf8,
         )
         check(unpackedLog.contains(#""method":"input.type""#), "with the input in it")
         let jpegs = unpackedFiles.filter { $0.hasSuffix(".jpg") }

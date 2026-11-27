@@ -146,7 +146,7 @@ enum HarvestArchive {
         }
     }
 
-    /// Writes exactly the `size` the header declares, so an `index.jsonl` that
+    /// Writes exactly the `size` the header declares, so a `session.jsonl` that
     /// grows while it is archived cannot shift the stream behind it.
     private static func emit(file: URL, size: Int, to gzip: gzFile) throws {
         guard size > 0 else { return }

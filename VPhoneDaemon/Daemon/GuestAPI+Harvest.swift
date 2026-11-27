@@ -115,9 +115,19 @@ extension GuestHarvestRecorder {
     /// screenshot and UI tree, so the guest instance sits beside the RPC
     /// surface; the engine file stays free of IcliKit for the Mac tests.
     static let guest = GuestHarvestRecorder(
-        root: URL(fileURLWithPath: "/var/root/vphoned-harvest", isDirectory: true),
+        root: harvestRoot(),
         capture: harvestCapture,
     )
+
+    /// Where sessions live: the jailbreak's fake root when the guest has one
+    /// (roothide), so the data sits with the jailbreak instead of in the real
+    /// `/var/root`. The path is resolved at runtime because the fake root
+    /// carries a per-install identifier (`.jbroot-<uuid>`).
+    private static func harvestRoot() -> URL {
+        let jbroot = GuestAPI.jailbreakInfo()["jbroot"] as? String
+        let base = jbroot.flatMap { $0.hasPrefix("/") && $0 != "/" ? $0 : nil } ?? ""
+        return URL(fileURLWithPath: base + "/var/root/vphoned-harvest", isDirectory: true)
+    }
 
     /// One screenshot and one UI tree at the profile's cost. A failure in either
     /// half is recorded in the index and the other half is still written: a
