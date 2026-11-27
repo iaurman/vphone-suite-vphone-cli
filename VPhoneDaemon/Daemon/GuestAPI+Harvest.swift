@@ -14,7 +14,10 @@ extension GuestAPI {
                     maxBytes: (params["max_bytes"] as? NSNumber)?.intValue,
                     maxSeconds: (params["max_seconds"] as? NSNumber)?.doubleValue,
                 )
-                return try GuestHarvestRecorder.guest.start(config)
+                return try GuestHarvestRecorder.guest.start(
+                    config,
+                    environment: harvestEnvironment(label: label(params)),
+                )
             case "harvest.stop":
                 return GuestHarvestRecorder.guest.stop()
             case "harvest.status", "harvest.sessions":
@@ -39,6 +42,37 @@ extension GuestAPI {
         } catch let error as GuestHarvestError {
             throw GuestAPIError.invalidRequest(error.description)
         }
+    }
+
+    /// The facts `harvest.start` copies into the manifest. `collectDeviceSnapshot`
+    /// is the same read `device.info` does, taken once per session; a failure
+    /// leaves fields unknown instead of failing the start. The device name and
+    /// the screen are separate reads on purpose: `device.info` adds them after
+    /// the snapshot, which does not carry either.
+    private static func harvestEnvironment(label: String?) -> GuestHarvestRecorder.Environment {
+        let snapshot = (try? collectDeviceSnapshot()) ?? [:]
+        let screen = screenInfo()
+        let device = deviceNameInfo()
+        return GuestHarvestRecorder.Environment(
+            vm: device["name"] as? String ?? device["own_name"] as? String,
+            model: snapshot["model"] as? String,
+            iosVersion: snapshot["ios_version"] as? String,
+            kernel: snapshot["kernel"] as? String,
+            vphonedHash: binaryHash,
+            screenWidth: (screen["width"] as? NSNumber)?.intValue,
+            screenHeight: (screen["height"] as? NSNumber)?.intValue,
+            screenScale: (screen["scale"] as? NSNumber)?.doubleValue,
+            timeZone: TimeZone.current.identifier,
+            label: label,
+        )
+    }
+
+    /// The caller's own description of the session, stored verbatim. Long text
+    /// is cut rather than rejected: a label is a note, not a contract.
+    private static func label(_ params: [String: Any]) -> String? {
+        guard let text = params["label"] as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(500))
     }
 
     /// The guest's tar, when it has one. `false` means neither binary exists,
@@ -114,6 +148,7 @@ extension GuestHarvestRecorder {
             problems.append("screenshot: \(Self.message(error))")
         }
         var tree: Data?
+        var foreground: Foreground?
         do {
             // The AX snapshot enables and restores switches process-wide; the
             // interface operations hold this lock for the same reason.
@@ -124,9 +159,13 @@ extension GuestHarvestRecorder {
                 "max_depth": profile.maxDepth,
                 "timeout_ms": profile.timeoutMS,
             ])
+            foreground = foregroundInfo(snapshot["foreground_after"] as? [String: Any])
             tree = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
         } catch {
             problems.append("ui.tree: \(Self.message(error))")
+            // The guest still names the app it has in front; record that,
+            // unverified, instead of leaving the frame without any app at all.
+            foreground = foregroundInfo(frontmostApp())
         }
         return Capture(
             jpeg: jpeg,
@@ -135,6 +174,20 @@ extension GuestHarvestRecorder {
             width: width,
             height: height,
             coordinateScale: scale,
+            foreground: foreground,
+        )
+    }
+
+    /// The part of a foreground answer worth keeping. `verified` is what the
+    /// tree's own check decided; a failed walk leaves it false.
+    private static func foregroundInfo(_ body: [String: Any]?) -> Foreground? {
+        guard let body,
+              let bundle = body["bundle_id"] as? String, !bundle.isEmpty
+        else { return nil }
+        return Foreground(
+            bundleID: bundle,
+            pid: (body["pid"] as? NSNumber)?.intValue,
+            verified: body["verified"] as? Bool,
         )
     }
 

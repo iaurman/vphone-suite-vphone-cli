@@ -44,6 +44,8 @@ enum HarvestTests {
             try clamping()
             try emptyStatus()
             try timerCadence()
+            try startFrame()
+            try selfDescribing()
             try startIsIdempotent()
             try interactionDebounce()
             try interactionLog()
@@ -177,10 +179,18 @@ enum HarvestTests {
         }
 
         @discardableResult
-        func start(interval: Double = 3, maxBytes: Int = 2 << 30, maxSeconds: Double = 1800) throws -> [String: Any] {
-            try recorder.start(GuestHarvestRecorder.Config(
-                intervalSeconds: interval, maxBytes: maxBytes, maxSeconds: maxSeconds,
-            ))
+        func start(
+            interval: Double = 3, maxBytes: Int = 2 << 30, maxSeconds: Double = 1800,
+            environment: GuestHarvestRecorder.Environment = .unknown,
+            captureAtStart: Bool = false,
+        ) throws -> [String: Any] {
+            try recorder.start(
+                GuestHarvestRecorder.Config(
+                    intervalSeconds: interval, maxBytes: maxBytes, maxSeconds: maxSeconds,
+                ),
+                environment: environment,
+                captureAtStart: captureAtStart,
+            )
         }
 
         /// Lets the loop run everything the clock and the gestures queued.
@@ -373,6 +383,108 @@ enum HarvestTests {
         check(manifest["recordedBytes"] as? Int == 6_000, "the manifest counts the bytes")
         check(manifest["stopReason"] is NSNull, "the session is still open")
         check(harness.status["stopReason"] is NSNull, "status agrees")
+    }
+
+    static func startFrame() throws {
+        let harness = Harness()
+        try harness.start(captureAtStart: true)
+        check(harness.runner.pending.count == 1, "the session asks for its opening frame at once")
+        harness.runner.runNext()
+        harness.settle()
+        check(harness.captures() == 1, "the opening frame is capture one")
+
+        let name = harness.session
+        let index = harness.index(name)
+        check(index.first?["trigger"] as? String == "start", "named start")
+        check(index.first?["gesture"] is NSNull, "the opening frame has no gesture")
+        check(index.first?["interaction"] is NSNull, "and no interaction")
+        check(
+            harness.files(name).contains { $0.hasPrefix("000001-") && $0.hasSuffix("-start.jpg") },
+            "the file name says start too",
+        )
+
+        // The interval runs from the start, not from the opening frame.
+        harness.tick(by: 3)
+        check(harness.captures() == 2, "the first tick still follows one interval later")
+        check(harness.index(name).last?["trigger"] as? String == "timer", "as a timer capture")
+    }
+
+    static func selfDescribing() throws {
+        let harness = Harness()
+        try harness.start(
+            interval: 3,
+            environment: GuestHarvestRecorder.Environment(
+                vm: "vm1",
+                model: "iPhone99,11",
+                iosVersion: "26.6.0",
+                kernel: "25.4.0",
+                vphonedHash: "abc123",
+                screenWidth: 430,
+                screenHeight: 932,
+                screenScale: 3,
+                timeZone: "Asia/Shanghai",
+                label: "open Settings, General, About",
+            ),
+            captureAtStart: false,
+        )
+
+        let name = harness.session
+        let manifest = harness.manifest(name)
+        check(manifest["formatVersion"] as? Int == 1, "the manifest is versioned")
+        check(manifest["vm"] as? String == "vm1", "the guest names the VM")
+        check(manifest["iosVersion"] as? String == "26.6.0", "and its iOS")
+        check(manifest["vphonedHash"] as? String == "abc123", "and the daemon build")
+        check(manifest["timeZone"] as? String == "Asia/Shanghai", "and the guest clock")
+        check(
+            manifest["label"] as? String == "open Settings, General, About",
+            "the caller's label is kept verbatim",
+        )
+        let screen = manifest["screen"] as? [String: Any] ?? [:]
+        check(screen["width"] as? Int == 430, "the screen width is copied")
+        check(screen["height"] as? Int == 932, "with its height")
+        check((screen["scale"] as? NSNumber)?.doubleValue == 3, "and its scale")
+        check(screen["space"] as? String == "points", "marked as points")
+        check(
+            (manifest["captureProfile"] as? [String: Any])?["interaction"] != nil,
+            "the capture profile is recorded",
+        )
+
+        let readme = (try? String(
+            contentsOf: harness.directory(name).appendingPathComponent("README.md"),
+            encoding: .utf8,
+        )) ?? ""
+        check(readme.contains("vphone-harvest/1"), "the README states the format version")
+        check(readme.contains("vm1"), "and the guest")
+        check(readme.contains("open Settings, General, About"), "and the label")
+        check(readme.contains("interactions.jsonl"), "and how to replay")
+
+        harness.input("input.touch", ["phase": "up", "x": 0.5, "y": 0.5, "normalized": true])
+        harness.advance(0.7)
+        harness.runner.runNext()
+        harness.settle()
+
+        let index = harness.index(name)
+        check(index.count == 1, "one frame")
+        let frame = index.first ?? [:]
+        check(frame["t"] as? Int == 700, "the frame is stamped in ms from the start")
+        check((frame["at"] as? String)?.contains(".") == true, "and its time carries milliseconds")
+        check(frame["jpeg"] as? String == "000001-\(Self.clockText(harness.clock.current))-interaction.jpg",
+              "the index names the JPEG")
+        check(frame["tree"] as? String != nil, "and the tree")
+        check(frame["jpeg_bytes"] as? Int == 1_000, "the halves are sized apart")
+        check(frame["tree_bytes"] as? Int == 1_000, "both of them")
+        check(frame["bytes"] as? Int == 2_000, "and together")
+        check(frame["foreground"] is NSNull, "a capture without a foreground says null")
+
+        let log = harness.interactions(name)
+        check(log.first?["t"] as? Int == 0, "the input is stamped from the start")
+        check((log.first?["at"] as? String)?.contains(".") == true, "with milliseconds")
+    }
+
+    /// The same `HHMMSS` the recorder puts in a capture's file name.
+    static func clockText(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: date)
+        return String(format: "%02d%02d%02d", parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
     }
 
     static func startIsIdempotent() throws {

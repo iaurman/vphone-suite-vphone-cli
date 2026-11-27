@@ -43,6 +43,33 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         }
     }
 
+    /// What the recorder knows about the guest at the moment the session
+    /// starts: identity, screen and clock only. Every field is a fact the guest
+    /// can answer or the host passed in `harvest.start`; an unknown one is left
+    /// out rather than guessed. The session's purpose, when the caller gives
+    /// one, is ``label``.
+    struct Environment: Equatable, Sendable {
+        /// The guest's own device name, which the host sets to the VM name.
+        var vm: String?
+        var model: String?
+        var iosVersion: String?
+        var kernel: String?
+        /// Hash of the serving vphoned, so a session names the daemon build
+        /// that recorded it without needing the host's bundle store.
+        var vphonedHash: String?
+        /// Screen size in points, as `device.info` reports it. Captures are in
+        /// pixels: multiply by ``screenScale`` to compare them.
+        var screenWidth: Int?
+        var screenHeight: Int?
+        var screenScale: Double?
+        var timeZone: String?
+        /// What the caller asked to record, verbatim. vphoned does not derive
+        /// one: an unlabelled session says so.
+        var label: String?
+
+        static let unknown = Environment()
+    }
+
     /// How one capture is taken. An interaction capture is deliberately cheap:
     /// it lands just after the input, so it must not walk the whole
     /// accessibility tree while the user is still interacting: the tree is on
@@ -79,6 +106,16 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         var width: Int? = nil
         var height: Int? = nil
         var coordinateScale: Double? = nil
+        /// The verified foreground app when the tree could resolve one, or the
+        /// app the guest named when it could not. Never inferred from pixels.
+        var foreground: Foreground? = nil
+    }
+
+    /// The foreground app as the guest saw it at capture time.
+    struct Foreground: Equatable, Sendable {
+        var bundleID: String?
+        var pid: Int?
+        var verified: Bool?
     }
 
     /// Where the recorder waits out its interval, its input-silence debounce
@@ -110,6 +147,7 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         let name: String
         let directory: URL
         let config: Config
+        let environment: Environment
         let startedAt: Date
         var stoppedAt: Date?
         var captures = 0
@@ -139,7 +177,12 @@ final class GuestHarvestRecorder: @unchecked Sendable {
     static let manifestName = "harvest.json"
     static let indexName = "index.jsonl"
     static let interactionsName = "interactions.jsonl"
+    static let readmeName = "README.md"
     static let archiveSuffix = ".tar.gz"
+
+    /// The on-disk format this recorder writes. A folder without it predates
+    /// versioning; readers must treat that as 0.
+    static let formatVersion = 1
 
     /// Session names are the guest's local time, as the session happened.
     private static func sessionName(for date: Date) -> String {
@@ -167,11 +210,29 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         date.formatted(Self.rfc3339)
     }
 
+    /// The two event logs carry milliseconds, so a burst's rhythm survives the
+    /// round trip. The manifest and the replies stay whole seconds.
+    private static func preciseTimestamp(_ date: Date) -> String {
+        date.formatted(Self.rfc3339Millis)
+    }
+
     /// `TimeZone.gmt` is iOS 16, and this daemon still builds for 15: the UTC
     /// zone by offset keeps both targets working.
     private static let rfc3339 = Date.ISO8601FormatStyle(
         timeZone: TimeZone(secondsFromGMT: 0) ?? TimeZone(identifier: "UTC")!,
     )
+    /// The same instant with milliseconds, for the two event logs: the order of
+    /// inputs inside one second is what a replay needs, and `seq` alone does not
+    /// say how long a drag took.
+    private static let rfc3339Millis = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: true,
+        timeZone: TimeZone(secondsFromGMT: 0) ?? TimeZone(identifier: "UTC")!,
+    )
+
+    /// Milliseconds from the session's start, monotonic within a session.
+    private static func milliseconds(_ date: Date, since start: Date) -> Int {
+        max(0, Int((date.timeIntervalSince(start) * 1000).rounded()))
+    }
 
     // MARK: - State
 
@@ -239,11 +300,19 @@ final class GuestHarvestRecorder: @unchecked Sendable {
 
     /// Starts a session, or reports the one already running: two harvests at
     /// once would write two indexes into the same file.
-    func start(_ config: Config) throws -> [String: Any] {
+    ///
+    /// `environment` is copied into the manifest verbatim; `captureAtStart`
+    /// takes the reference frame a replay starts from (the tests turn it off to
+    /// keep their counts about the timer alone).
+    func start(
+        _ config: Config,
+        environment: Environment = .unknown,
+        captureAtStart: Bool = true,
+    ) throws -> [String: Any] {
         try queue.sync {
             if session?.running == true { return payloadLocked() }
             prune()
-            try begin(config.clamped())
+            try begin(config.clamped(), environment: environment, captureAtStart: captureAtStart)
             return payloadLocked()
         }
     }
@@ -386,7 +455,11 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         queue.async { self.recordInput(record) }
     }
 
-    private func begin(_ config: Config) throws {
+    private func begin(
+        _ config: Config,
+        environment: Environment,
+        captureAtStart: Bool,
+    ) throws {
         let manager = FileManager.default
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
         let name = availableSessionName()
@@ -396,6 +469,7 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             name: name,
             directory: directory,
             config: config,
+            environment: environment,
             startedAt: clock.now,
         )
         // The file exists from the first second, so every session archives the
@@ -407,7 +481,13 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         self.session = session
         setAcceptingInput(true)
         writeManifest(session)
+        writeReadme(session)
         armTick()
+        // The frame a replay starts from: the screen before any input of this
+        // session, taken at the interval the reference captures use.
+        if captureAtStart {
+            beginCapture(trigger: "start", gesture: nil, interaction: nil)
+        }
     }
 
     private func setAcceptingInput(_ value: Bool) {
@@ -503,9 +583,13 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         }
         let line: [String: Any] = [
             "seq": sequence,
-            "at": Self.timestamp(now),
+            "t": Self.milliseconds(now, since: current.startedAt),
+            "at": Self.preciseTimestamp(now),
             "method": input.method,
             "params": input.params,
+            // The capture this input's burst produced. Moves and every gesture
+            // in one burst name the same one; it is the frame after the burst,
+            // not a one-to-one pairing.
             "capture": capture ?? NSNull(),
         ]
         do {
@@ -679,15 +763,21 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             + Self.captureClock(now) + "-" + trigger
         var error = capture.error
         var written = 0
+        var jpegName: String?
+        var treeName: String?
         do {
             // In this order, so a daemon that dies mid-capture leaves at worst
             // a file the index does not name.
             if let jpeg = capture.jpeg {
-                try jpeg.write(to: current.directory.appendingPathComponent(base + ".jpg"), options: .atomic)
+                let name = base + ".jpg"
+                try jpeg.write(to: current.directory.appendingPathComponent(name), options: .atomic)
+                jpegName = name
                 written += jpeg.count
             }
             if let tree = capture.tree {
-                try tree.write(to: current.directory.appendingPathComponent(base + ".tree.json"), options: .atomic)
+                let name = base + ".tree.json"
+                try tree.write(to: current.directory.appendingPathComponent(name), options: .atomic)
+                treeName = name
                 written += tree.count
             }
         } catch let failure {
@@ -695,14 +785,24 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         }
         let line: [String: Any] = [
             "seq": sequence,
-            "at": Self.timestamp(now),
+            "t": Self.milliseconds(now, since: current.startedAt),
+            "at": Self.preciseTimestamp(now),
             "trigger": trigger,
             "gesture": gesture ?? NSNull(),
             "interaction": interaction ?? NSNull(),
+            // Named rather than derived from `seq`: a reader must not have to
+            // know the naming rule, and the tree is absent when the walk failed.
+            "jpeg": jpegName ?? NSNull(),
+            "tree": treeName ?? NSNull(),
+            "jpeg_bytes": capture.jpeg?.count ?? 0,
+            "tree_bytes": capture.tree?.count ?? 0,
+            "bytes": written,
+            // Pixels of the JPEG; divide by `coordinate_scale` for points, which
+            // is the space a tree's `frame` uses.
             "width": capture.width ?? NSNull(),
             "height": capture.height ?? NSNull(),
             "coordinate_scale": capture.coordinateScale ?? NSNull(),
-            "bytes": written,
+            "foreground": capture.foreground.map { Self.foregroundBody($0) } ?? NSNull(),
             "ms": ms,
             "error": error ?? NSNull(),
         ]
@@ -880,7 +980,52 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         var body = statusFields(session)
         body["running"] = session.running
         body["notes"] = session.notes
+        // Facts copied at start, so the folder describes itself without the
+        // host's bundle store or the guest: see harvest-format.md.
+        body["formatVersion"] = Self.formatVersion
+        body.merge(Self.environmentBody(session.environment)) { _, new in new }
+        body["captureProfile"] = Self.captureProfileBody()
         return body
+    }
+
+    private static func environmentBody(_ environment: Environment) -> [String: Any] {
+        [
+            "vm": environment.vm ?? NSNull(),
+            "model": environment.model ?? NSNull(),
+            "iosVersion": environment.iosVersion ?? NSNull(),
+            "kernel": environment.kernel ?? NSNull(),
+            "vphonedHash": environment.vphonedHash ?? NSNull(),
+            // Points, the space a tree's `frame` uses. Index width/height are
+            // the JPEG's pixels: multiply points by `scale` for those.
+            "screen": [
+                "width": environment.screenWidth ?? NSNull(),
+                "height": environment.screenHeight ?? NSNull(),
+                "scale": environment.screenScale ?? NSNull(),
+                "space": "points",
+            ] as [String: Any],
+            "timeZone": environment.timeZone ?? NSNull(),
+            "label": environment.label ?? NSNull(),
+        ]
+    }
+
+    private static func captureProfileBody() -> [String: Any] {
+        func body(_ profile: CaptureProfile) -> [String: Any] {
+            [
+                "nativeResolution": profile.nativeResolution,
+                "maxElements": profile.maxElements,
+                "maxDepth": profile.maxDepth,
+                "timeoutMS": profile.timeoutMS,
+            ]
+        }
+        return ["timer": body(.timer), "interaction": body(.interaction)]
+    }
+
+    private static func foregroundBody(_ foreground: Foreground) -> [String: Any] {
+        [
+            "bundle_id": foreground.bundleID ?? NSNull(),
+            "pid": foreground.pid ?? NSNull(),
+            "verified": foreground.verified ?? NSNull(),
+        ]
     }
 
     private func summary(_ body: [String: Any]) -> [String: Any] {
@@ -894,6 +1039,7 @@ final class GuestHarvestRecorder: @unchecked Sendable {
             "interactionCaptures": body["interactionCaptures"] ?? 0,
             "interactions": body["interactions"] ?? 0,
             "bytes": body["recordedBytes"] ?? 0,
+            "label": body["label"] ?? NSNull(),
             "notes": body["notes"] ?? [],
             "running": body["running"] ?? false,
         ]
@@ -936,6 +1082,105 @@ final class GuestHarvestRecorder: @unchecked Sendable {
         } catch {
             NSLog("vphoned: harvest: could not write the manifest of %@: %@", session.name, String(describing: error))
         }
+    }
+
+    /// A README that travels with the folder: the format version, the
+    /// environment copied at start, what each file is, what each field means and
+    /// how to replay. A fixed template plus those values — it can never claim
+    /// more than the recorder observed.
+    private func writeReadme(_ session: Session) {
+        do {
+            let url = session.directory.appendingPathComponent(Self.readmeName)
+            try Self.readme(for: session).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("vphoned: harvest: could not write the README of %@: %@", session.name, String(describing: error))
+        }
+    }
+
+    private static func readme(for session: Session) -> String {
+        let environment = session.environment
+        func text(_ value: String?, missing: String = "(unknown)") -> String {
+            value.flatMap { $0.isEmpty ? nil : $0 } ?? missing
+        }
+        func number<T>(_ value: T?) -> String {
+            value.map { "\($0)" } ?? "(unknown)"
+        }
+        let model = environment.model.map { " (\($0))" } ?? ""
+        let label = environment.label.flatMap { $0.isEmpty ? nil : $0 } ?? "(none)"
+        let screen = "\(number(environment.screenWidth))x\(number(environment.screenHeight)) points"
+            + " at scale \(number(environment.screenScale))"
+        return """
+        # vphone harvest session \(session.name)
+
+        Written by vphoned when the session started. It describes this folder and
+        the format; it does not summarise what happened.
+
+        - format: vphone-harvest/\(formatVersion)
+        - guest: \(text(environment.vm))\(model), iOS \(text(environment.iosVersion))
+        - kernel: \(text(environment.kernel)), vphoned \(text(environment.vphonedHash))
+        - screen: \(screen)
+        - started: \(timestamp(session.startedAt)) (UTC; the session name is guest-local time)
+        - time zone: \(text(environment.timeZone))
+        - label: \(label)
+        - interval: \(session.config.intervalSeconds) s, caps \(session.config.maxBytes) bytes
+          and \(session.config.maxSeconds) s
+
+        `at` is RFC 3339 UTC, `t` is milliseconds from `startedAt`. The event
+        logs carry milliseconds; the manifest and the replies whole seconds.
+
+        ## Files
+
+        - `harvest.json` — this session's counters and the facts above; rewritten
+          after every capture.
+        - `index.jsonl` — one JSON object per capture, in `seq` order.
+        - `interactions.jsonl` — one JSON object per served input, in `seq`
+          order. Every input is logged, gestures or not, so this file is the
+          replay.
+        - `NNNNNN-HHMMSS-trigger.jpg` — screenshot in pixels.
+        - `NNNNNN-HHMMSS-trigger.tree.json` — accessibility tree of the same
+          moment. `frame` values are points; multiply by `coordinate_scale` to
+          compare them with the JPEG. Absent when the walk could not verify a
+          foreground app.
+
+        ## index.jsonl
+
+        - `seq` — capture number, 1-based; the file names start with it.
+        - `t`, `at` — when the capture was written.
+        - `trigger` — `start` (the opening frame), `timer` (every interval) or
+          `interaction` (after 600 ms of input silence, 2 s cap, 800 ms apart).
+        - `gesture` — the gesture that ended the burst, or null.
+        - `interaction` — the interaction `seq` this frame belongs to, or null.
+          On a `timer` line it means the timer took the frame the burst was
+          waiting for; `trigger` stays `timer` because that is what ran.
+        - `jpeg`, `tree` — file names in this folder, or null.
+        - `jpeg_bytes`, `tree_bytes`, `bytes` — sizes; `bytes` is the sum.
+        - `width`, `height`, `coordinate_scale` — JPEG pixels and pixels per point.
+        - `foreground` — `{bundle_id, pid, verified}` of the app at that moment,
+          or null when the guest could not name one.
+        - `ms` — how long the capture took.
+        - `error` — what failed, or null. A frame can be missing either half.
+
+        ## interactions.jsonl
+
+        - `seq` — 1-based input number, the replay order.
+        - `t`, `at` — when the input was served.
+        - `method` — the vphoned RPC, e.g. `input.touch`.
+        - `params` — that call's parameters, verbatim.
+        - `capture` — the capture its burst produced, or null. Every input of one
+          drag or tap names the same frame; it is not a one-to-one pairing. An
+          input served while a capture was already in flight names no frame: the
+          next frame shows its result, but the link is not claimed after the fact.
+
+        ## Replaying
+
+        1. Start the guest on the same screen as the first frame
+           (`000001-...-start.jpg` when the session has one).
+        2. Send every line in `seq` order: `vphone-launchpad-cli guest rpc <vm>
+           <method> '<params>'`.
+        3. An x/y with `normalized: true` is a fraction of the screen; otherwise
+           it is points. Divide the JPEG's pixels by `coordinate_scale` for points.
+        4. Compare the JPEG of each `capture` with what the same input produces.
+        """
     }
 
     private func writeManifest(_ body: [String: Any], to directory: URL) throws {
